@@ -1,0 +1,11 @@
+[package]
+name = "atv-iptv-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "LAN-only IPTV authentication and channel proxy for the ATV client"
+license = "MIT"
+repository = "https://github.com/ultracold273/atv-iptv-proxy"
+
+[dependencies]
+
+[dev-dependencies]

@@ -1,0 +1,15 @@
+/target/
+/.idea/
+/.vscode/
+*.log
+*.pid
+*.sock
+
+# Local runtime state and secrets
+/data/
+/config/local.toml
+*.secret
+
+# OpenWrt packaging outputs
+/dist/
+/build/
