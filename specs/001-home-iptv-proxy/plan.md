@@ -4,7 +4,7 @@
 
 ## Summary
 
-Create a small Rust proxy service for x86_64 OpenWrt. The proxy owns CTC IPTV backend authentication, caches channel/EPG data, serves a normalized LAN API to ATV clients, and provides a password-protected LAN admin page for provider config and local token management.
+Create a small Rust proxy service for x86_64 OpenWrt. The proxy owns CTC IPTV backend authentication, caches channel/EPG data, rewrites backend multicast stream URLs through configured `udpxy`, serves a normalized LAN API to ATV clients, and provides a password-protected LAN admin page for provider config and local token management.
 
 ## Technical Context
 
@@ -15,7 +15,7 @@ Create a small Rust proxy service for x86_64 OpenWrt. The proxy owns CTC IPTV ba
 **Planned Minimal Dependencies**: to be added only where justified by implementation tasks  
 **Storage**: file-backed config/state under OpenWrt service directory, atomic writes  
 **Testing**: Rust unit tests plus integration tests using in-process mock backend listeners  
-**Security Constraints**: no plaintext provider password in logs/API; no raw local token persistence; admin page LAN-only and password protected
+**Security Constraints**: no plaintext provider password in logs/API; no raw local token persistence; admin page LAN-only and password protected; raw backend stream URLs are not exposed to clients by default
 
 ## Dependency Policy
 
@@ -29,6 +29,7 @@ The proxy should stay dependency-light, but not at the cost of security-critical
 | Random tokens | Read from `/dev/urandom` on OpenWrt/Linux | Avoid `rand` initially |
 | Hashing | Use a small audited hash crate if needed | Likely justified |
 | 3DES CTC auth | Use RustCrypto DES/cipher crates rather than custom crypto | Justified |
+| Stream URL rewrite | Small local parser for `igmp://` and `rtp://` URLs | Avoid URL crate initially |
 | HTML admin | Server-rendered static strings | No template engine |
 | Async runtime | Blocking threads and request limits | Avoid initially |
 | Database | Atomic JSON/state files | Avoid SQLite |
@@ -51,6 +52,7 @@ atv-iptv-proxy/
 │   │   ├── client.rs          # backend HTTP flow
 │   │   └── parsers.rs         # response parsing
 │   ├── cache.rs               # TTL, stale fallback, atomic writes
+│   ├── stream.rs              # multicast -> udpxy playable URL resolver
 │   └── api.rs                 # `/api/v1/*` routes
 ├── tests/
 │   ├── admin_flow.rs
@@ -70,8 +72,8 @@ atv-iptv-proxy/
 - [x] Add `.gitignore` for Rust build outputs, local config, runtime state, and packaging artifacts.
 - [x] Add README pointing to spec and plan.
 - [x] Add placeholder `src/main.rs` so `cargo test` has a starting point.
-- [ ] Initialize git repository and add remote `https://github.com/ultracold273/atv-iptv-proxy.git`.
-- [ ] Run `cargo test` to verify the scaffold.
+- [x] Initialize git repository and add remote `https://github.com/ultracold273/atv-iptv-proxy.git`.
+- [x] Run `cargo test` to verify the scaffold.
 
 ## Phase 1: Configuration & State Foundation
 
@@ -81,8 +83,9 @@ Create file-backed config/state primitives with secret redaction and atomic writ
 
 ### Tasks
 
-- [ ] Define `ProxyConfig`: listen addresses, LAN CIDRs, cache TTLs, admin password hash, provider config, token metadata.
+- [ ] Define `ProxyConfig`: listen addresses, LAN CIDRs, cache TTLs, admin password hash, provider config, stream proxy config, token metadata.
 - [ ] Define `ProviderConfig`: User ID, password secret, STB ID, IP, MAC, auth server URL.
+- [ ] Define `StreamProxyConfig`: `udpxy` base URL, rewrite policy, and optional raw-stream diagnostics flag.
 - [ ] Define redacted status views so admin/API output cannot include secrets.
 - [ ] Implement atomic write helper: write temp file, fsync where practical, rename.
 - [ ] Add tests for config load/save, redaction, malformed config, and atomic write failure handling.
@@ -112,7 +115,7 @@ Serve the LAN admin page and protected client API without pulling in a web frame
 - [ ] Implement limited HTTP/1.1 parser with method, path, query, headers, and bounded body size.
 - [ ] Implement response helpers for HTML, JSON, redirects, and errors.
 - [ ] Add LAN source-address check for admin routes.
-- [ ] Build server-rendered admin pages: login, status, provider config, token management, manual refresh.
+- [ ] Build server-rendered admin pages: login, status, provider config, `udpxy` config, token management, manual refresh.
 - [ ] Add admin session handling or password challenge flow.
 - [ ] Add tests for unauthorized admin access, LAN restriction, password failure, config save, token create/revoke, and CSRF-resistant form handling.
 
@@ -139,13 +142,17 @@ Expose the normalized proxy API and ensure cache behavior prevents constant back
 
 ### Tasks
 
+- [ ] Implement `stream.rs` resolver: HTTP(S) passthrough, `igmp://` rewrite, `rtp://` rewrite, blank `udpxy` configuration error.
+- [ ] Normalize `udpxy` base URL values with or without scheme and trailing slash.
+- [ ] Apply stream URL resolution during channel normalization before writing channel cache or returning API data.
 - [ ] Implement channel cache with TTL, stale fallback, refresh metadata, and atomic persistence.
 - [ ] Implement refresh coalescing so concurrent cold-cache requests share one backend refresh.
 - [ ] Implement `GET /health`.
 - [ ] Implement `GET /api/v1/channels` with token authentication and cache metadata.
+- [ ] Ensure `/api/v1/channels.data[].streamUrl` is directly playable by ATV clients.
 - [ ] Implement structured JSON errors with stable codes.
 - [ ] Add EPG endpoint skeletons or first implementation depending on client needs.
-- [ ] Add tests for cache hit, cache miss, concurrent refresh, stale fallback, no-cache backend failure, and unauthorized API calls.
+- [ ] Add tests for stream URL rewrite, missing `udpxy` failure, cache hit, cache miss, concurrent refresh, stale fallback, no-cache backend failure, and unauthorized API calls.
 
 ## Phase 6: OpenWrt Deployment
 
@@ -174,6 +181,7 @@ Close the loop with repeatable tests and security checks.
 - [ ] Add grep-style secret leak checks for logs/fixtures where practical.
 - [ ] Add malformed request tests: oversize body, missing headers, invalid token, invalid query, broken backend response.
 - [ ] Add cache corruption recovery tests.
+- [ ] Add regression fixtures where backend channels include `igmp://`, `rtp://`, HTTP(S), and malformed stream URLs.
 - [ ] Add a CI workflow for `cargo fmt --check`, `cargo clippy`, and `cargo test` after the GitHub remote exists.
 
 ## Open Questions
@@ -181,6 +189,7 @@ Close the loop with repeatable tests and security checks.
 - Should the first release support EPG endpoints, or only channel import while Android keeps direct EPG behavior disabled in proxy mode?
 - Should admin auth use a short-lived session cookie or a password challenge on every form submission?
 - Should OpenWrt deployment use native package feeds later, or is copying a binary plus init script enough for early releases?
+- Should raw backend stream URLs ever be retained in cache for diagnostics, or should cache store only resolved playable URLs?
 
 ## Complexity Tracking
 
