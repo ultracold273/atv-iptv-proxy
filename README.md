@@ -18,3 +18,22 @@ Planned remote:
 ```text
 https://github.com/ultracold273/atv-iptv-proxy.git
 ```
+
+## CI/CD
+
+Pull requests and pushes run:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+```
+
+Version tags create a GitHub Release with a Linux x86_64 binary tarball:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release artifact is intended as the initial OpenWrt x86_64 deployment binary. Native OpenWrt package/feed publishing can be added once the service layout stabilizes.
