@@ -1,11 +1,8 @@
-fn main() {
-    println!("atv-iptv-proxy: spec-first scaffold");
-}
+use atv_iptv_proxy::server;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn scaffold_compiles() {
-        assert_eq!(2 + 2, 4);
+fn main() {
+    if let Err(err) = server::run_from_env() {
+        eprintln!("atv-iptv-proxy: {err}");
+        std::process::exit(1);
     }
 }
