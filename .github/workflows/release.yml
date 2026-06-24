@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: atv-iptv-proxy
+
+jobs:
+  build-linux-x86_64:
+    name: Build Linux x86_64 release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/release/${BIN_NAME}" "dist/${BIN_NAME}-linux-x86_64"
+          tar -C dist -czf "dist/${BIN_NAME}-linux-x86_64.tar.gz" "${BIN_NAME}-linux-x86_64"
+          shasum -a 256 "dist/${BIN_NAME}-linux-x86_64.tar.gz" > "dist/${BIN_NAME}-linux-x86_64.tar.gz.sha256"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/atv-iptv-proxy-linux-x86_64.tar.gz
+            dist/atv-iptv-proxy-linux-x86_64.tar.gz.sha256
+          generate_release_notes: true
+
