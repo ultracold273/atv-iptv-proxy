@@ -14,8 +14,19 @@ pub struct ProxyConfig {
     pub admin_password_hash: String,
     pub channel_cache_ttl_seconds: u64,
     pub backend_channels_url: Option<String>,
+    pub provider: Option<ProviderConfig>,
     pub stream: StreamProxyConfig,
     pub tokens: Vec<ClientToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub user_id: String,
+    pub password: String,
+    pub stb_id: String,
+    pub local_ip: String,
+    pub local_mac: String,
+    pub auth_server_url: String,
 }
 
 impl Default for ProxyConfig {
@@ -25,6 +36,7 @@ impl Default for ProxyConfig {
             admin_password_hash: hash_secret("admin"),
             channel_cache_ttl_seconds: 3600,
             backend_channels_url: None,
+            provider: None,
             stream: StreamProxyConfig::default(),
             tokens: Vec::new(),
         }

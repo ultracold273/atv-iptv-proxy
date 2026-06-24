@@ -37,3 +37,5 @@ git push origin v0.1.0
 ```
 
 The release artifact is intended as the initial OpenWrt x86_64 deployment binary. Native OpenWrt package/feed publishing can be added once the service layout stabilizes.
+
+See [docs/openwrt.md](docs/openwrt.md) for the current OpenWrt service setup.
