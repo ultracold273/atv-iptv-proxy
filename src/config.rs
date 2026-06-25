@@ -12,10 +12,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ProxyConfig {
     pub listen: String,
     pub admin_password_hash: String,
+    #[serde(default = "default_channel_cache_ttl_seconds")]
     pub channel_cache_ttl_seconds: u64,
+    #[serde(default = "default_epg_cache_ttl_seconds")]
+    pub epg_cache_ttl_seconds: u64,
     pub backend_channels_url: Option<String>,
     pub provider: Option<ProviderConfig>,
+    #[serde(default)]
     pub stream: StreamProxyConfig,
+    #[serde(default)]
     pub tokens: Vec<ClientToken>,
 }
 
@@ -34,13 +39,22 @@ impl Default for ProxyConfig {
         Self {
             listen: "127.0.0.1:8088".into(),
             admin_password_hash: hash_secret("admin"),
-            channel_cache_ttl_seconds: 3600,
+            channel_cache_ttl_seconds: default_channel_cache_ttl_seconds(),
+            epg_cache_ttl_seconds: default_epg_cache_ttl_seconds(),
             backend_channels_url: None,
             provider: None,
             stream: StreamProxyConfig::default(),
             tokens: Vec::new(),
         }
     }
+}
+
+fn default_channel_cache_ttl_seconds() -> u64 {
+    3600
+}
+
+fn default_epg_cache_ttl_seconds() -> u64 {
+    300
 }
 
 impl ProxyConfig {
