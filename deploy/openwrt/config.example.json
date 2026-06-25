@@ -1,0 +1,19 @@
+{
+  "listen": "192.168.1.1:8088",
+  "admin_password_hash": "sha256:replace-with-hash-from-admin-tool",
+  "channel_cache_ttl_seconds": 3600,
+  "backend_channels_url": null,
+  "provider": {
+    "user_id": "replace-me",
+    "password": "replace-me",
+    "stb_id": "replace-me",
+    "local_ip": "192.168.1.2",
+    "local_mac": "00:00:5E:00:53:01",
+    "auth_server_url": "http://provider.example:8298"
+  },
+  "stream": {
+    "udpxy_base_url": "http://192.168.1.1:4022"
+  },
+  "tokens": []
+}
+
