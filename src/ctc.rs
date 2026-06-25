@@ -1,4 +1,4 @@
-use crate::cache::Channel;
+use crate::cache::{Channel, Program};
 use crate::config::ProviderConfig;
 use crate::stream::{resolve_stream_url, StreamProxyConfig};
 use des::TdesEde3;
@@ -56,6 +56,32 @@ pub fn fetch_channels(
             })
         })
         .collect()
+}
+
+pub fn fetch_programs(
+    provider: &ProviderConfig,
+    channel_code: &str,
+    date_offset: i32,
+) -> Result<Vec<Program>, String> {
+    let session = login(provider)?;
+    fetch_programs_with_session(&session, channel_code, date_offset)
+}
+
+pub fn fetch_programs_with_session(
+    session: &LoginSession,
+    channel_code: &str,
+    date_offset: i32,
+) -> Result<Vec<Program>, String> {
+    let root = session
+        .epg_lb_base
+        .strip_suffix("function/")
+        .unwrap_or(&session.epg_lb_base);
+    let url = format!(
+        "{root}frame1194/CHANNEL_PLAYER_UTILS/datas/prevue_list.jsp?channelcode={}&framecode=frame1194&versiondir=CHANNEL_PLAYER_UTILS&dateindex={date_offset}&stbtype=sdr&ajax=1",
+        encode_query_component(channel_code)
+    );
+    let body = get(&url, Some(&format!("JSESSIONID={}", session.jsession_id)))?;
+    parse_programs(&body)
 }
 
 pub fn login(provider: &ProviderConfig) -> Result<LoginSession, String> {
@@ -299,6 +325,81 @@ fn parse_mixno_mapping(json_text: &str) -> HashMap<String, String> {
         .collect()
 }
 
+fn parse_programs(json_text: &str) -> Result<Vec<Program>, String> {
+    let value = serde_json::from_str::<serde_json::Value>(json_text)
+        .map_err(|e| format!("EPG JSON parse failed: {e}"))?;
+    let entries = value
+        .get("channelPrevue")
+        .and_then(|v| v.as_array())
+        .ok_or("EPG channelPrevue missing")?;
+    Ok(entries.iter().filter_map(program_from_value).collect())
+}
+
+fn program_from_value(value: &serde_json::Value) -> Option<Program> {
+    let start = normalize_ctc_time(value.get("begintime")?.as_str()?)?;
+    let end = normalize_ctc_time(value.get("endtime")?.as_str()?)?;
+    Some(Program {
+        code: value
+            .get("prevuecode")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        name: value
+            .get("prevuename")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        start,
+        end,
+        is_live: value.get("isLive").and_then(|v| v.as_str()) == Some("1"),
+        is_replayable: value.get("isBack").and_then(|v| v.as_str()) == Some("1")
+            || value.get("isRecord").and_then(|v| v.as_str()) == Some("1"),
+    })
+}
+
+fn normalize_ctc_time(raw: &str) -> Option<String> {
+    if raw.len() == 14 && raw.chars().all(|c| c.is_ascii_digit()) {
+        return Some(format!(
+            "{}-{}-{}T{}:{}:{}+08:00",
+            &raw[0..4],
+            &raw[4..6],
+            &raw[6..8],
+            &raw[8..10],
+            &raw[10..12],
+            &raw[12..14]
+        ));
+    }
+    if raw.len() == 19 {
+        let bytes = raw.as_bytes();
+        let dotted = bytes[4] == b'.' && bytes[7] == b'.' && bytes[10] == b' ';
+        if dotted {
+            return Some(format!(
+                "{}-{}-{}T{}+08:00",
+                &raw[0..4],
+                &raw[5..7],
+                &raw[8..10],
+                &raw[11..19]
+            ));
+        }
+    }
+    if raw.contains('T') {
+        return Some(raw.to_string());
+    }
+    None
+}
+
+fn encode_query_component(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn parse_cookie_value(header: &str, name: &str) -> Option<String> {
     header.split(';').find_map(|part| {
         let (k, v) = part.trim().split_once('=')?;
@@ -371,5 +472,30 @@ mod tests {
     fn parses_mapping() {
         let mapping = parse_mixno_mapping(r#"{"channelMixnoMapping":"001:100,002:200"}"#);
         assert_eq!(Some(&"100".to_string()), mapping.get("001"));
+    }
+
+    #[test]
+    fn parses_programs_and_normalizes_timestamps() {
+        let programs = parse_programs(
+            r#"{"channelPrevue":[
+              {"prevuecode":"p1","prevuename":"News","begintime":"20260607080000","endtime":"20260607090000","isLive":"1","isBack":"0","isRecord":"1"},
+              {"prevuecode":"p2","prevuename":"Bad","begintime":"bad","endtime":"20260607100000"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(1, programs.len());
+        assert_eq!("p1", programs[0].code);
+        assert_eq!("2026-06-07T08:00:00+08:00", programs[0].start);
+        assert!(programs[0].is_live);
+        assert!(programs[0].is_replayable);
+    }
+
+    #[test]
+    fn normalizes_dotted_timestamp() {
+        assert_eq!(
+            Some("2026-03-14T00:56:00+08:00".to_string()),
+            normalize_ctc_time("2026.03.14 00:56:00")
+        );
     }
 }

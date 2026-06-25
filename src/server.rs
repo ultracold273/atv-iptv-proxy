@@ -1,6 +1,6 @@
 use crate::auth::{find_valid_token, generate_token, hash_secret, verify_secret, ClientToken};
 use crate::backend;
-use crate::cache::{now_secs, ChannelCache};
+use crate::cache::{now_secs, ChannelCache, EpgCache, EpgCacheKey};
 use crate::config::ProxyConfig;
 use crate::stream::StreamProxyConfig;
 use serde::Serialize;
@@ -15,6 +15,7 @@ pub struct AppState {
     config_path: PathBuf,
     config: Mutex<ProxyConfig>,
     cache: Mutex<ChannelCache>,
+    epg_cache: Mutex<EpgCache>,
 }
 
 pub fn run_from_env() -> Result<(), String> {
@@ -27,6 +28,7 @@ pub fn run_from_env() -> Result<(), String> {
         config_path,
         config: Mutex::new(config),
         cache: Mutex::new(ChannelCache::default()),
+        epg_cache: Mutex::new(EpgCache::default()),
     });
     serve(&listen, state)
 }
@@ -69,6 +71,7 @@ pub fn handle_request(raw: &str, state: &AppState) -> String {
         ("POST", "/admin/config") => admin_config(&request, state),
         ("POST", "/admin/tokens") => admin_create_token(&request, state),
         ("GET", "/api/v1/channels") => channels(&request, state),
+        ("GET", "/api/v1/epg/day") => epg_day(&request, state),
         _ => json_error(404, "not_found", "not found"),
     }
 }
@@ -186,6 +189,64 @@ fn channels(request: &Request, state: &AppState) -> String {
     }
 }
 
+fn epg_day(request: &Request, state: &AppState) -> String {
+    if !authorized_client(request, state) {
+        return json_error(401, "unauthorized", "valid bearer token required");
+    }
+    let Some(channel_code) = request.query.get("channelCode").filter(|v| !v.is_empty()) else {
+        return json_error(
+            400,
+            "missing_channel_code",
+            "channelCode query parameter is required",
+        );
+    };
+    let date_offset = match request
+        .query
+        .get("dateOffset")
+        .map(String::as_str)
+        .unwrap_or("0")
+        .parse::<i32>()
+    {
+        Ok(value @ -1..=1) => value,
+        _ => return json_error(400, "invalid_date_offset", "dateOffset must be -1, 0, or 1"),
+    };
+    let key = EpgCacheKey {
+        channel_code: channel_code.clone(),
+        date_offset,
+    };
+    let (ttl, provider) = {
+        let cfg = state.config.lock().unwrap();
+        (cfg.epg_cache_ttl_seconds, cfg.provider.clone())
+    };
+    let now = now_secs();
+    {
+        let cache = state.epg_cache.lock().unwrap();
+        if cache.is_fresh(&key, ttl, now) {
+            if let Some(resp) = cache.response(&key, ttl, false) {
+                return json(200, &resp);
+            }
+        }
+    }
+    let Some(provider) = provider else {
+        return json_error(503, "backend_not_configured", "provider is not configured");
+    };
+
+    match crate::ctc::fetch_programs(&provider, channel_code, date_offset) {
+        Ok(programs) => {
+            let mut cache = state.epg_cache.lock().unwrap();
+            cache.update(key.clone(), programs, now);
+            json(200, &cache.response(&key, ttl, false).unwrap())
+        }
+        Err(e) => {
+            if let Some(stale) = state.epg_cache.lock().unwrap().response(&key, ttl, true) {
+                json(200, &stale)
+            } else {
+                json_error(503, "backend_unavailable", &e)
+            }
+        }
+    }
+}
+
 fn authorized_admin(request: &Request, state: &AppState) -> bool {
     let Some(value) = request.headers.get("x-admin-password") else {
         return false;
@@ -213,6 +274,7 @@ fn authorized_client(request: &Request, state: &AppState) -> bool {
 struct Request {
     method: String,
     path: String,
+    query: HashMap<String, String>,
     headers: HashMap<String, String>,
     body: String,
 }
@@ -230,7 +292,8 @@ impl Request {
             .ok_or_else(|| "missing method".to_string())?
             .to_string();
         let target = parts.next().ok_or_else(|| "missing target".to_string())?;
-        let path = target.split('?').next().unwrap_or(target).to_string();
+        let (path_raw, query_raw) = target.split_once('?').unwrap_or((target, ""));
+        let path = path_raw.to_string();
         let mut headers = HashMap::new();
         for line in lines {
             if let Some((k, v)) = line.split_once(':') {
@@ -240,6 +303,7 @@ impl Request {
         Ok(Self {
             method,
             path,
+            query: parse_form(query_raw),
             headers,
             body: body.to_string(),
         })
@@ -254,7 +318,28 @@ fn parse_form(body: &str) -> HashMap<String, String> {
 }
 
 fn percent_decode(value: &str) -> String {
-    value.replace('+', " ")
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &value[i + 1..i + 3];
+            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                out.push(v);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn json<T: Serialize>(status: u16, value: &T) -> String {
@@ -305,6 +390,7 @@ mod tests {
             config_path: path,
             config: Mutex::new(config),
             cache: Mutex::new(ChannelCache::default()),
+            epg_cache: Mutex::new(EpgCache::default()),
         }
     }
 
@@ -318,6 +404,16 @@ mod tests {
     fn channels_requires_token() {
         let state = state(ProxyConfig::default());
         let resp = handle_request("GET /api/v1/channels HTTP/1.1\r\n\r\n", &state);
+        assert!(resp.contains("401 Unauthorized"));
+    }
+
+    #[test]
+    fn epg_requires_token() {
+        let state = state(ProxyConfig::default());
+        let resp = handle_request(
+            "GET /api/v1/epg/day?channelCode=ch1 HTTP/1.1\r\n\r\n",
+            &state,
+        );
         assert!(resp.contains("401 Unauthorized"));
     }
 
@@ -363,5 +459,69 @@ mod tests {
         );
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("\"name\":\"A\""));
+    }
+
+    #[test]
+    fn epg_validates_query() {
+        let mut cfg = ProxyConfig::default();
+        cfg.tokens.push(ClientToken {
+            name: "tv".into(),
+            hash: hash_secret("token"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        let state = state(cfg);
+
+        let missing = handle_request(
+            "GET /api/v1/epg/day HTTP/1.1\r\nauthorization: Bearer token\r\n\r\n",
+            &state,
+        );
+        assert!(missing.contains("400 Bad Request"));
+        assert!(missing.contains("missing_channel_code"));
+
+        let invalid = handle_request(
+            "GET /api/v1/epg/day?channelCode=ch1&dateOffset=2 HTTP/1.1\r\nauthorization: Bearer token\r\n\r\n",
+            &state,
+        );
+        assert!(invalid.contains("400 Bad Request"));
+        assert!(invalid.contains("invalid_date_offset"));
+    }
+
+    #[test]
+    fn fresh_epg_cache_is_served() {
+        let mut cfg = ProxyConfig::default();
+        cfg.tokens.push(ClientToken {
+            name: "tv".into(),
+            hash: hash_secret("token"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        let state = state(cfg);
+        let key = EpgCacheKey {
+            channel_code: "ch1".into(),
+            date_offset: 0,
+        };
+        state.epg_cache.lock().unwrap().update(
+            key,
+            vec![crate::cache::Program {
+                code: "p1".into(),
+                name: "News".into(),
+                start: "2026-06-07T08:00:00+08:00".into(),
+                end: "2026-06-07T09:00:00+08:00".into(),
+                is_live: true,
+                is_replayable: false,
+            }],
+            now_secs(),
+        );
+
+        let resp = handle_request(
+            "GET /api/v1/epg/day?channelCode=ch1&dateOffset=0 HTTP/1.1\r\nauthorization: Bearer token\r\n\r\n",
+            &state,
+        );
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("\"code\":\"p1\""));
+        assert!(resp.contains("\"isLive\":true"));
     }
 }

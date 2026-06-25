@@ -56,6 +56,8 @@ Edit `/etc/atv-iptv-proxy/config.json` and set:
 - `listen` to the LAN router address and proxy port.
 - `provider` fields for the IPTV backend.
 - `stream.udpxy_base_url` to the HTTP address clients can reach.
+- `channel_cache_ttl_seconds` for channel-list refresh frequency.
+- `epg_cache_ttl_seconds` for program-guide refresh frequency. The default is 300 seconds.
 - `admin_password_hash` to a SHA-256 hash created by the proxy token/hash tooling once that CLI is added. Until then, generate it from a trusted machine and keep the plaintext out of the config.
 
 ## Install Service
@@ -78,3 +80,14 @@ http://192.168.1.1:4022/udp/239.0.0.1:8000
 ```
 
 Make sure Android TV clients can reach both the proxy port and the `udpxy` port on the LAN.
+
+## EPG API
+
+Authorized clients can query program-guide data through the proxy:
+
+```http
+GET /api/v1/epg/day?channelCode=ch1&dateOffset=0
+Authorization: Bearer atv_living-room_...
+```
+
+`dateOffset` supports `-1`, `0`, and `1`. Responses use normalized program JSON with `start` and `end` as ISO-8601 strings. The proxy caches EPG data by channel and date offset, and may return stale cached guide data if the IPTV backend is temporarily unavailable.
