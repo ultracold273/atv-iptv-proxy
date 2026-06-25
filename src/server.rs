@@ -140,10 +140,11 @@ fn channels(request: &Request, state: &AppState) -> String {
     if !authorized_client(request, state) {
         return json_error(401, "unauthorized", "valid bearer token required");
     }
-    let (ttl, backend_url, stream_cfg) = {
+    let (ttl, provider, backend_url, stream_cfg) = {
         let cfg = state.config.lock().unwrap();
         (
             cfg.channel_cache_ttl_seconds,
+            cfg.provider.clone(),
             cfg.backend_channels_url.clone(),
             cfg.stream.clone(),
         )
@@ -157,14 +158,19 @@ fn channels(request: &Request, state: &AppState) -> String {
             }
         }
     }
-    let Some(url) = backend_url else {
+    let fetched = if let Some(provider) = provider {
+        crate::ctc::fetch_channels(&provider, &stream_cfg)
+    } else if let Some(url) = backend_url {
+        backend::fetch_channels(&url, &stream_cfg)
+    } else {
         return json_error(
             503,
             "backend_not_configured",
-            "backend channel URL is not configured",
+            "provider or backend channel URL is not configured",
         );
     };
-    match backend::fetch_channels(&url, &stream_cfg) {
+
+    match fetched {
         Ok(channels) => {
             let mut cache = state.cache.lock().unwrap();
             cache.update(channels, now);
