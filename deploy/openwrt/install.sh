@@ -49,9 +49,12 @@ need_cmd mv
 
 if [ "$TAG" = "latest" ]; then
     RELEASE_BASE="https://github.com/${REPO}/releases/latest/download"
+    SOURCE_REF="${ATV_PROXY_SOURCE_REF:-main}"
 else
     RELEASE_BASE="https://github.com/${REPO}/releases/download/${TAG}"
+    SOURCE_REF="${ATV_PROXY_SOURCE_REF:-${TAG}}"
 fi
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${SOURCE_REF}"
 
 mkdir -p "$TMP_DIR"
 ARCHIVE_PATH="${TMP_DIR}/${ARCHIVE_NAME}"
@@ -74,47 +77,13 @@ mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
 mv "${TMP_DIR}/atv-iptv-proxy-linux-x86_64" "$BIN_PATH"
 chmod 0755 "$BIN_PATH"
 
-cat > "$INIT_PATH" <<'INIT_EOF'
-#!/bin/sh /etc/rc.common
-
-START=95
-STOP=10
-USE_PROCD=1
-
-PROG=/usr/bin/atv-iptv-proxy
-CONFIG=/etc/atv-iptv-proxy/config.json
-
-start_service() {
-    procd_open_instance
-    procd_set_param command "$PROG"
-    procd_set_param env ATV_PROXY_CONFIG="$CONFIG"
-    procd_set_param respawn 3600 5 5
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
-
-reload_service() {
-    stop
-    start
-}
-INIT_EOF
+log "installing init script from ${RAW_BASE}/deploy/openwrt/atv-iptv-proxy.init"
+download "${RAW_BASE}/deploy/openwrt/atv-iptv-proxy.init" "$INIT_PATH"
 chmod 0755 "$INIT_PATH"
 
 if [ ! -f "$CONFIG_PATH" ]; then
-    cat > "$CONFIG_PATH" <<'CONFIG_EOF'
-{
-  "listen": "192.168.1.1:8088",
-  "admin_password_hash": "sha256:replace-with-hash-from-admin-tool",
-  "channel_cache_ttl_seconds": 3600,
-  "backend_channels_url": null,
-  "provider": null,
-  "stream": {
-    "udpxy_base_url": "http://192.168.1.1:4022"
-  },
-  "tokens": []
-}
-CONFIG_EOF
+    log "installing config template from ${RAW_BASE}/deploy/openwrt/config.example.json"
+    download "${RAW_BASE}/deploy/openwrt/config.example.json" "$CONFIG_PATH"
     chmod 0600 "$CONFIG_PATH"
     log "created config at ${CONFIG_PATH}; edit provider credentials before production use"
 else
@@ -130,4 +99,3 @@ log "installed ${BIN_PATH}"
 log "service: ${INIT_PATH}"
 log "config: ${CONFIG_PATH}"
 log "edit config, then run: ${INIT_PATH} restart"
-

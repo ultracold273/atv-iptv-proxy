@@ -27,9 +27,11 @@ The installer:
 - downloads `atv-iptv-proxy-linux-x86_64.tar.gz` from GitHub Releases;
 - verifies the SHA-256 file when `sha256sum` is available;
 - installs `/usr/bin/atv-iptv-proxy`;
-- installs `/etc/init.d/atv-iptv-proxy`;
-- creates `/etc/atv-iptv-proxy/config.json` if missing;
+- installs `/etc/init.d/atv-iptv-proxy` from `deploy/openwrt/atv-iptv-proxy.init`;
+- creates `/etc/atv-iptv-proxy/config.json` from `deploy/openwrt/config.example.json` if missing;
 - enables and restarts the service.
+
+By default, `ATV_PROXY_VERSION=latest` downloads release assets from the latest release and deployment files from `main`. For a pinned release, the installer downloads deployment files from the same tag. Override `ATV_PROXY_SOURCE_REF` if you need a different branch or commit for the deployment files.
 
 Review and edit `/etc/atv-iptv-proxy/config.json` after installation.
 
