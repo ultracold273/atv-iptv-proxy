@@ -39,7 +39,7 @@ jobs:
           mkdir -p dist
           cp "target/release/${BIN_NAME}" "dist/${BIN_NAME}-linux-x86_64"
           tar -C dist -czf "dist/${BIN_NAME}-linux-x86_64.tar.gz" "${BIN_NAME}-linux-x86_64"
-          shasum -a 256 "dist/${BIN_NAME}-linux-x86_64.tar.gz" > "dist/${BIN_NAME}-linux-x86_64.tar.gz.sha256"
+          (cd dist && shasum -a 256 "${BIN_NAME}-linux-x86_64.tar.gz" > "${BIN_NAME}-linux-x86_64.tar.gz.sha256")
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -48,4 +48,3 @@ jobs:
             dist/atv-iptv-proxy-linux-x86_64.tar.gz
             dist/atv-iptv-proxy-linux-x86_64.tar.gz.sha256
           generate_release_notes: true
-
