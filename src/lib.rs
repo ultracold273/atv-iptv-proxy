@@ -3,5 +3,6 @@ pub mod backend;
 pub mod cache;
 pub mod config;
 pub mod ctc;
+pub mod http_body;
 pub mod server;
 pub mod stream;

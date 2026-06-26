@@ -6,11 +6,17 @@ USE_PROCD=1
 
 PROG=/usr/bin/atv-iptv-proxy
 CONFIG=/etc/atv-iptv-proxy/config.json
+CHANNEL_NUMBER_OVERRIDES=/etc/atv-iptv-proxy/channel-number-overrides.json
 
 start_service() {
     procd_open_instance
-    procd_set_param command "$PROG"
-    procd_set_param env ATV_PROXY_CONFIG="$CONFIG"
+    if [ -f "$CHANNEL_NUMBER_OVERRIDES" ]; then
+        procd_set_param command "$PROG" \
+            --config "$CONFIG" \
+            --channel-number-overrides "$CHANNEL_NUMBER_OVERRIDES"
+    else
+        procd_set_param command "$PROG" --config "$CONFIG"
+    fi
     procd_set_param respawn 3600 5 5
     procd_set_param stdout 1
     procd_set_param stderr 1
@@ -21,4 +27,3 @@ reload_service() {
     stop
     start
 }
-

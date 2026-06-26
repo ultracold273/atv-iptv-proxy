@@ -11,6 +11,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 ureq = { version = "2.12", default-features = false }
+encoding_rs = "0.8"
 des = "0.8"
 ecb = { version = "0.1", features = ["alloc", "block-padding"] }
 

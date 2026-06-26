@@ -13,12 +13,14 @@ struct BackendChannel {
 }
 
 pub fn fetch_channels(url: &str, stream: &StreamProxyConfig) -> Result<Vec<Channel>, String> {
-    let text = ureq::get(url)
+    eprintln!("backend: fetching_channels url={url}");
+    let resp = ureq::get(url)
         .call()
-        .map_err(|e| format!("backend request failed: {e}"))?
-        .into_string()
-        .map_err(|e| format!("backend body failed: {e}"))?;
-    parse_backend_channels(&text, stream)
+        .map_err(|e| format!("backend request failed: {e}"))?;
+    let text = crate::http_body::response_to_string(resp, "backend GET channels")?;
+    let channels = parse_backend_channels(&text, stream)?;
+    eprintln!("backend: fetched_channels count={}", channels.len());
+    Ok(channels)
 }
 
 pub fn parse_backend_channels(
