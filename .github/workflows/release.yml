@@ -13,8 +13,8 @@ env:
   BIN_NAME: atv-iptv-proxy
 
 jobs:
-  build-linux-x86_64:
-    name: Build Linux x86_64 release
+  build-openwrt-x86_64:
+    name: Build OpenWrt x86_64 release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,29 +22,34 @@ jobs:
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Run tests
         run: cargo test --locked
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
 
       - name: Package artifact
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "target/release/${BIN_NAME}" "dist/${BIN_NAME}-linux-x86_64"
-          tar -C dist -czf "dist/${BIN_NAME}-linux-x86_64.tar.gz" "${BIN_NAME}-linux-x86_64"
-          (cd dist && shasum -a 256 "${BIN_NAME}-linux-x86_64.tar.gz" > "${BIN_NAME}-linux-x86_64.tar.gz.sha256")
+          cp "target/x86_64-unknown-linux-musl/release/${BIN_NAME}" "dist/${BIN_NAME}-openwrt-x86_64"
+          tar -C dist -czf "dist/${BIN_NAME}-openwrt-x86_64.tar.gz" "${BIN_NAME}-openwrt-x86_64"
+          (cd dist && shasum -a 256 "${BIN_NAME}-openwrt-x86_64.tar.gz" > "${BIN_NAME}-openwrt-x86_64.tar.gz.sha256")
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/atv-iptv-proxy-linux-x86_64.tar.gz
-            dist/atv-iptv-proxy-linux-x86_64.tar.gz.sha256
+            dist/atv-iptv-proxy-openwrt-x86_64.tar.gz
+            dist/atv-iptv-proxy-openwrt-x86_64.tar.gz.sha256
           generate_release_notes: true
