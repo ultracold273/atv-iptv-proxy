@@ -9,6 +9,7 @@ CONFIG_DIR="${ATV_PROXY_CONFIG_DIR:-/etc/atv-iptv-proxy}"
 INIT_PATH="${ATV_PROXY_INIT_PATH:-/etc/init.d/atv-iptv-proxy}"
 BIN_PATH="${INSTALL_DIR}/atv-iptv-proxy"
 CONFIG_PATH="${CONFIG_DIR}/config.json"
+OVERRIDES_PATH="${CONFIG_DIR}/channel-number-overrides.json"
 TMP_DIR="${TMPDIR:-/tmp}/atv-iptv-proxy-install.$$"
 
 log() {
@@ -81,21 +82,37 @@ log "installing init script from ${RAW_BASE}/deploy/openwrt/atv-iptv-proxy.init"
 download "${RAW_BASE}/deploy/openwrt/atv-iptv-proxy.init" "$INIT_PATH"
 chmod 0755 "$INIT_PATH"
 
+CREATED_CONFIG=0
 if [ ! -f "$CONFIG_PATH" ]; then
     log "installing config template from ${RAW_BASE}/deploy/openwrt/config.example.json"
     download "${RAW_BASE}/deploy/openwrt/config.example.json" "$CONFIG_PATH"
     chmod 0600 "$CONFIG_PATH"
     log "created config at ${CONFIG_PATH}; edit provider credentials before production use"
+    CREATED_CONFIG=1
 else
     log "keeping existing config at ${CONFIG_PATH}"
 fi
 
+if [ ! -f "$OVERRIDES_PATH" ]; then
+    log "installing channel number override template from ${RAW_BASE}/deploy/openwrt/channel-number-overrides.example.json"
+    download "${RAW_BASE}/deploy/openwrt/channel-number-overrides.example.json" "$OVERRIDES_PATH"
+    chmod 0644 "$OVERRIDES_PATH"
+    log "created channel number overrides at ${OVERRIDES_PATH}; edit or remove it as needed"
+else
+    log "keeping existing channel number overrides at ${OVERRIDES_PATH}"
+fi
+
 if [ -x "$INIT_PATH" ]; then
     "$INIT_PATH" enable || true
-    "$INIT_PATH" restart || "$INIT_PATH" start || true
+    if [ "$CREATED_CONFIG" = "0" ]; then
+        "$INIT_PATH" restart || "$INIT_PATH" start || true
+    else
+        log "service enabled but not started; set admin_password_hash in ${CONFIG_PATH}, then run: ${INIT_PATH} restart"
+    fi
 fi
 
 log "installed ${BIN_PATH}"
 log "service: ${INIT_PATH}"
 log "config: ${CONFIG_PATH}"
+log "channel number overrides: ${OVERRIDES_PATH}"
 log "edit config, then run: ${INIT_PATH} restart"

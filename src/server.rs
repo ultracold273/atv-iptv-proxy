@@ -1,31 +1,104 @@
 use crate::auth::{find_valid_token, generate_token, hash_secret, verify_secret, ClientToken};
 use crate::backend;
 use crate::cache::{now_secs, ChannelCache, EpgCache, EpgCacheKey};
-use crate::config::ProxyConfig;
+use crate::config::{load_channel_number_overrides, ProxyConfig};
 use crate::stream::StreamProxyConfig;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::env;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub struct AppState {
     config_path: PathBuf,
+    channel_number_overrides_path: Option<PathBuf>,
     config: Mutex<ProxyConfig>,
     cache: Mutex<ChannelCache>,
     epg_cache: Mutex<EpgCache>,
 }
 
-pub fn run_from_env() -> Result<(), String> {
-    let config_path = env::var("ATV_PROXY_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("config/local.json"));
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerArgs {
+    pub config_path: PathBuf,
+    pub channel_number_overrides_path: Option<PathBuf>,
+}
+
+impl Default for ServerArgs {
+    fn default() -> Self {
+        Self {
+            config_path: PathBuf::new(),
+            channel_number_overrides_path: None,
+        }
+    }
+}
+
+pub fn parse_args<I>(args: I) -> Result<ServerArgs, String>
+where
+    I: IntoIterator,
+    I::Item: Into<String>,
+{
+    let mut parsed = ServerArgs::default();
+    let mut config_path = None;
+    let mut args = args.into_iter().map(Into::into);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--config requires a path".to_string())?;
+                config_path = Some(PathBuf::from(value));
+            }
+            "--channel-number-overrides" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--channel-number-overrides requires a path".to_string())?;
+                parsed.channel_number_overrides_path = Some(PathBuf::from(value));
+            }
+            "--help" | "-h" => return Err(usage()),
+            _ if arg.starts_with("--config=") => {
+                config_path = Some(PathBuf::from(&arg["--config=".len()..]));
+            }
+            _ if arg.starts_with("--channel-number-overrides=") => {
+                parsed.channel_number_overrides_path =
+                    Some(PathBuf::from(&arg["--channel-number-overrides=".len()..]));
+            }
+            _ => return Err(format!("unknown argument: {arg}\n{}", usage())),
+        }
+    }
+
+    parsed.config_path = config_path.ok_or_else(|| format!("--config is required\n{}", usage()))?;
+
+    Ok(parsed)
+}
+
+pub fn usage() -> String {
+    "usage: atv-iptv-proxy --config PATH [--channel-number-overrides PATH]".to_string()
+}
+
+pub fn run(args: ServerArgs) -> Result<(), String> {
+    let config_path = args.config_path;
+    let override_path = args.channel_number_overrides_path;
     let config = ProxyConfig::load_or_default(&config_path).map_err(|e| e.to_string())?;
+    config.validate_startup()?;
     let listen = config.listen.clone();
+    eprintln!(
+        "startup: config={} channel_number_overrides={} listen={} provider_configured={} backend_configured={} tokens={}",
+        config_path.display(),
+        override_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not configured".to_string()),
+        listen,
+        config.provider.is_some(),
+        config.backend_channels_url.is_some(),
+        config.tokens.len()
+    );
     let state = Arc::new(AppState {
         config_path,
+        channel_number_overrides_path: override_path,
         config: Mutex::new(config),
         cache: Mutex::new(ChannelCache::default()),
         epg_cache: Mutex::new(EpgCache::default()),
@@ -35,6 +108,7 @@ pub fn run_from_env() -> Result<(), String> {
 
 pub fn serve(addr: &str, state: Arc<AppState>) -> Result<(), String> {
     let listener = TcpListener::bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
+    eprintln!("server: listening on {addr}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -50,22 +124,38 @@ pub fn serve(addr: &str, state: Arc<AppState>) -> Result<(), String> {
 }
 
 fn handle_stream(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
+    let peer = stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     let mut buf = vec![0u8; 64 * 1024];
     let n = stream.read(&mut buf)?;
     if n == 0 {
+        eprintln!("request: peer={peer} empty_read=true");
         return Ok(());
     }
     let request = String::from_utf8_lossy(&buf[..n]);
     let response = handle_request(&request, state);
+    eprintln!(
+        "response: peer={} status={} bytes={}",
+        peer,
+        response_status(&response),
+        response.len()
+    );
     stream.write_all(response.as_bytes())
 }
 
 pub fn handle_request(raw: &str, state: &AppState) -> String {
+    let started = Instant::now();
     let request = match Request::parse(raw) {
         Ok(req) => req,
-        Err(msg) => return json_error(400, "bad_request", &msg),
+        Err(msg) => {
+            eprintln!("request: parse_failed error={msg}");
+            return json_error(400, "bad_request", &msg);
+        }
     };
-    match (request.method.as_str(), request.path.as_str()) {
+    eprintln!("request: method={} path={}", request.method, request.path);
+    let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => json(200, &serde_json::json!({"ok": true})),
         ("GET", "/admin") => admin_page(state),
         ("POST", "/admin/config") => admin_config(&request, state),
@@ -73,7 +163,15 @@ pub fn handle_request(raw: &str, state: &AppState) -> String {
         ("GET", "/api/v1/channels") => channels(&request, state),
         ("GET", "/api/v1/epg/day") => epg_day(&request, state),
         _ => json_error(404, "not_found", "not found"),
-    }
+    };
+    eprintln!(
+        "request: method={} path={} status={} elapsed_ms={}",
+        request.method,
+        request.path,
+        response_status(&response),
+        started.elapsed().as_millis()
+    );
+    response
 }
 
 fn admin_page(state: &AppState) -> String {
@@ -89,16 +187,19 @@ fn admin_page(state: &AppState) -> String {
 
 fn admin_config(request: &Request, state: &AppState) -> String {
     if !authorized_admin(request, state) {
+        eprintln!("admin_config: unauthorized");
         return json_error(401, "admin_unauthorized", "admin password required");
     }
     let form = parse_form(&request.body);
     let mut cfg = state.config.lock().unwrap();
+    let mut updated = Vec::new();
     if let Some(v) = form.get("backend_channels_url") {
         cfg.backend_channels_url = if v.trim().is_empty() {
             None
         } else {
             Some(v.trim().to_string())
         };
+        updated.push("backend_channels_url");
     }
     if let Some(v) = form.get("udpxy_base_url") {
         cfg.stream = StreamProxyConfig {
@@ -108,22 +209,29 @@ fn admin_config(request: &Request, state: &AppState) -> String {
                 Some(v.trim().to_string())
             },
         };
+        updated.push("udpxy_base_url");
     }
     if let Err(e) = cfg.save_atomic(&state.config_path) {
+        eprintln!("admin_config: save_failed error={e}");
         return json_error(500, "config_save_failed", &e.to_string());
     }
+    eprintln!("admin_config: saved fields={}", updated.join(","));
     json(200, &serde_json::json!({"ok": true}))
 }
 
 fn admin_create_token(request: &Request, state: &AppState) -> String {
     if !authorized_admin(request, state) {
+        eprintln!("admin_token: unauthorized");
         return json_error(401, "admin_unauthorized", "admin password required");
     }
     let form = parse_form(&request.body);
     let name = form.get("name").map(String::as_str).unwrap_or("client");
     let raw = match generate_token(name) {
         Ok(token) => token,
-        Err(e) => return json_error(500, "token_generation_failed", &e.to_string()),
+        Err(e) => {
+            eprintln!("admin_token: generation_failed name={name} error={e}");
+            return json_error(500, "token_generation_failed", &e.to_string());
+        }
     };
     let mut cfg = state.config.lock().unwrap();
     cfg.tokens.push(ClientToken {
@@ -134,15 +242,21 @@ fn admin_create_token(request: &Request, state: &AppState) -> String {
         enabled: true,
     });
     if let Err(e) = cfg.save_atomic(&state.config_path) {
+        eprintln!("admin_token: save_failed name={name} error={e}");
         return json_error(500, "config_save_failed", &e.to_string());
     }
+    eprintln!(
+        "admin_token: created name={name} total_tokens={}",
+        cfg.tokens.len()
+    );
     json(200, &serde_json::json!({"token": raw}))
 }
 
 fn channels(request: &Request, state: &AppState) -> String {
-    if !authorized_client(request, state) {
+    let Some(client_name) = authorized_client_name(request, state) else {
+        eprintln!("channels: unauthorized");
         return json_error(401, "unauthorized", "valid bearer token required");
-    }
+    };
     let (ttl, provider, backend_url, stream_cfg) = {
         let cfg = state.config.lock().unwrap();
         (
@@ -157,15 +271,33 @@ fn channels(request: &Request, state: &AppState) -> String {
         let cache = state.cache.lock().unwrap();
         if cache.is_fresh(ttl, now) {
             if let Some(resp) = cache.response(ttl, false) {
+                eprintln!(
+                    "channels: cache_hit client={} count={} ttl_seconds={}",
+                    client_name,
+                    resp.data.len(),
+                    ttl
+                );
                 return json(200, &resp);
             }
         }
     }
     let fetched = if let Some(provider) = provider {
-        crate::ctc::fetch_channels(&provider, &stream_cfg)
+        eprintln!(
+            "channels: cache_miss client={} source=provider",
+            client_name
+        );
+        match load_channel_number_overrides(state.channel_number_overrides_path.as_deref()) {
+            Ok(overrides) => crate::ctc::fetch_channels(&provider, &stream_cfg, &overrides),
+            Err(e) => Err(format!("channel number overrides load failed: {e}")),
+        }
     } else if let Some(url) = backend_url {
+        eprintln!(
+            "channels: cache_miss client={} source=backend_url",
+            client_name
+        );
         backend::fetch_channels(&url, &stream_cfg)
     } else {
+        eprintln!("channels: backend_not_configured client={client_name}");
         return json_error(
             503,
             "backend_not_configured",
@@ -175,25 +307,98 @@ fn channels(request: &Request, state: &AppState) -> String {
 
     match fetched {
         Ok(channels) => {
+            let channels = sort_channels_by_number(ensure_unique_channel_numbers(channels));
+            let count = channels.len();
             let mut cache = state.cache.lock().unwrap();
             cache.update(channels, now);
+            eprintln!(
+                "channels: refresh_ok client={} count={}",
+                client_name, count
+            );
             json(200, &cache.response(ttl, false).unwrap())
         }
         Err(e) => {
             if let Some(stale) = state.cache.lock().unwrap().response(ttl, true) {
+                eprintln!(
+                    "channels: refresh_failed_serving_stale client={} count={} error={}",
+                    client_name,
+                    stale.data.len(),
+                    e
+                );
                 json(200, &stale)
             } else {
+                eprintln!(
+                    "channels: refresh_failed_no_cache client={} error={}",
+                    client_name, e
+                );
                 json_error(503, "backend_unavailable", &e)
             }
         }
     }
 }
 
-fn epg_day(request: &Request, state: &AppState) -> String {
-    if !authorized_client(request, state) {
-        return json_error(401, "unauthorized", "valid bearer token required");
+fn ensure_unique_channel_numbers(
+    mut channels: Vec<crate::cache::Channel>,
+) -> Vec<crate::cache::Channel> {
+    let mut counts = HashMap::new();
+    for channel in &channels {
+        *counts.entry(channel.number).or_insert(0) += 1;
     }
+
+    let mut used = HashSet::new();
+    for channel in &channels {
+        if counts.get(&channel.number) == Some(&1) {
+            used.insert(channel.number);
+        }
+    }
+
+    let mut next = 1;
+    let mut duplicate_heads = HashSet::new();
+
+    for channel in &mut channels {
+        if counts.get(&channel.number) == Some(&1) {
+            continue;
+        }
+
+        if duplicate_heads.insert(channel.number) && used.insert(channel.number) {
+            continue;
+        }
+
+        let original = channel.number;
+        while used.contains(&next) {
+            next += 1;
+        }
+        channel.number = next;
+        used.insert(next);
+        eprintln!(
+            "channels: channel_number collision source=final_response number={} channel={} channel_code={} action=fallback fallback_number={}",
+            original,
+            channel.name,
+            channel.channel_code.as_deref().unwrap_or(""),
+            next
+        );
+    }
+
+    channels
+}
+
+fn sort_channels_by_number(mut channels: Vec<crate::cache::Channel>) -> Vec<crate::cache::Channel> {
+    channels.sort_by(|a, b| {
+        a.number
+            .cmp(&b.number)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.channel_code.cmp(&b.channel_code))
+    });
+    channels
+}
+
+fn epg_day(request: &Request, state: &AppState) -> String {
+    let Some(client_name) = authorized_client_name(request, state) else {
+        eprintln!("epg_day: unauthorized");
+        return json_error(401, "unauthorized", "valid bearer token required");
+    };
     let Some(channel_code) = request.query.get("channelCode").filter(|v| !v.is_empty()) else {
+        eprintln!("epg_day: missing_channel_code client={client_name}");
         return json_error(
             400,
             "missing_channel_code",
@@ -208,7 +413,10 @@ fn epg_day(request: &Request, state: &AppState) -> String {
         .parse::<i32>()
     {
         Ok(value @ -1..=1) => value,
-        _ => return json_error(400, "invalid_date_offset", "dateOffset must be -1, 0, or 1"),
+        _ => {
+            eprintln!("epg_day: invalid_date_offset client={client_name}");
+            return json_error(400, "invalid_date_offset", "dateOffset must be -1, 0, or 1");
+        }
     };
     let key = EpgCacheKey {
         channel_code: channel_code.clone(),
@@ -223,24 +431,57 @@ fn epg_day(request: &Request, state: &AppState) -> String {
         let cache = state.epg_cache.lock().unwrap();
         if cache.is_fresh(&key, ttl, now) {
             if let Some(resp) = cache.response(&key, ttl, false) {
+                eprintln!(
+                    "epg_day: cache_hit client={} channel={} date_offset={} count={} ttl_seconds={}",
+                    client_name,
+                    channel_code,
+                    date_offset,
+                    resp.data.len(),
+                    ttl
+                );
                 return json(200, &resp);
             }
         }
     }
     let Some(provider) = provider else {
+        eprintln!(
+            "epg_day: provider_not_configured client={} channel={} date_offset={}",
+            client_name, channel_code, date_offset
+        );
         return json_error(503, "backend_not_configured", "provider is not configured");
     };
 
+    eprintln!(
+        "epg_day: cache_miss client={} channel={} date_offset={} source=provider",
+        client_name, channel_code, date_offset
+    );
     match crate::ctc::fetch_programs(&provider, channel_code, date_offset) {
         Ok(programs) => {
+            let count = programs.len();
             let mut cache = state.epg_cache.lock().unwrap();
             cache.update(key.clone(), programs, now);
+            eprintln!(
+                "epg_day: refresh_ok client={} channel={} date_offset={} count={}",
+                client_name, channel_code, date_offset, count
+            );
             json(200, &cache.response(&key, ttl, false).unwrap())
         }
         Err(e) => {
             if let Some(stale) = state.epg_cache.lock().unwrap().response(&key, ttl, true) {
+                eprintln!(
+                    "epg_day: refresh_failed_serving_stale client={} channel={} date_offset={} count={} error={}",
+                    client_name,
+                    channel_code,
+                    date_offset,
+                    stale.data.len(),
+                    e
+                );
                 json(200, &stale)
             } else {
+                eprintln!(
+                    "epg_day: refresh_failed_no_cache client={} channel={} date_offset={} error={}",
+                    client_name, channel_code, date_offset, e
+                );
                 json_error(503, "backend_unavailable", &e)
             }
         }
@@ -255,19 +496,15 @@ fn authorized_admin(request: &Request, state: &AppState) -> bool {
     verify_secret(value, &cfg.admin_password_hash)
 }
 
-fn authorized_client(request: &Request, state: &AppState) -> bool {
-    let Some(header) = request.headers.get("authorization") else {
-        return false;
-    };
-    let Some(raw) = header.strip_prefix("Bearer ") else {
-        return false;
-    };
+fn authorized_client_name(request: &Request, state: &AppState) -> Option<String> {
+    let header = request.headers.get("authorization")?;
+    let raw = header.strip_prefix("Bearer ")?;
     let mut cfg = state.config.lock().unwrap();
-    let ok = find_valid_token(&mut cfg.tokens, raw).is_some();
-    if ok {
+    let client_name = find_valid_token(&mut cfg.tokens, raw).map(|token| token.name.clone());
+    if client_name.is_some() {
         let _ = cfg.save_atomic(&state.config_path);
     }
-    ok
+    client_name
 }
 
 #[derive(Debug)]
@@ -373,6 +610,14 @@ fn response(status: u16, content_type: &str, body: String) -> String {
     )
 }
 
+fn response_status(response: &str) -> &str {
+    response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("unknown")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +633,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         AppState {
             config_path: path,
+            channel_number_overrides_path: None,
             config: Mutex::new(config),
             cache: Mutex::new(ChannelCache::default()),
             epg_cache: Mutex::new(EpgCache::default()),
@@ -398,6 +644,33 @@ mod tests {
     fn health_is_public() {
         let state = state(ProxyConfig::default());
         assert!(handle_request("GET /health HTTP/1.1\r\n\r\n", &state).contains("200 OK"));
+    }
+
+    #[test]
+    fn parses_startup_paths() {
+        let args = parse_args([
+            "--config",
+            "/etc/atv-iptv-proxy/config.json",
+            "--channel-number-overrides=/etc/atv-iptv-proxy/channel-number-overrides.json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            PathBuf::from("/etc/atv-iptv-proxy/config.json"),
+            args.config_path
+        );
+        assert_eq!(
+            Some(PathBuf::from(
+                "/etc/atv-iptv-proxy/channel-number-overrides.json"
+            )),
+            args.channel_number_overrides_path
+        );
+    }
+
+    #[test]
+    fn startup_config_path_is_required() {
+        let err = parse_args(std::iter::empty::<&str>()).unwrap_err();
+        assert!(err.contains("--config is required"));
     }
 
     #[test]
@@ -459,6 +732,64 @@ mod tests {
         );
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("\"name\":\"A\""));
+    }
+
+    #[test]
+    fn final_channel_numbers_are_unique() {
+        let channels = ensure_unique_channel_numbers(vec![
+            crate::cache::Channel {
+                number: 1,
+                name: "A".into(),
+                stream_url: "http://a".into(),
+                channel_code: Some("a".into()),
+            },
+            crate::cache::Channel {
+                number: 1,
+                name: "B".into(),
+                stream_url: "http://b".into(),
+                channel_code: Some("b".into()),
+            },
+            crate::cache::Channel {
+                number: 2,
+                name: "C".into(),
+                stream_url: "http://c".into(),
+                channel_code: Some("c".into()),
+            },
+        ]);
+
+        assert_eq!(
+            vec![1, 3, 2],
+            channels.iter().map(|ch| ch.number).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn channels_sort_by_number_before_caching() {
+        let channels = sort_channels_by_number(vec![
+            crate::cache::Channel {
+                number: 3,
+                name: "C".into(),
+                stream_url: "http://c".into(),
+                channel_code: Some("c".into()),
+            },
+            crate::cache::Channel {
+                number: 1,
+                name: "A".into(),
+                stream_url: "http://a".into(),
+                channel_code: Some("a".into()),
+            },
+            crate::cache::Channel {
+                number: 2,
+                name: "B".into(),
+                stream_url: "http://b".into(),
+                channel_code: Some("b".into()),
+            },
+        ]);
+
+        assert_eq!(
+            vec![1, 2, 3],
+            channels.iter().map(|ch| ch.number).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "listen": "192.168.1.1:8088",
-  "admin_password_hash": "sha256:replace-with-hash-from-admin-tool",
+  "admin_password_hash": "sha256:replace-with-sha256-hex",
   "channel_cache_ttl_seconds": 3600,
   "epg_cache_ttl_seconds": 300,
   "backend_channels_url": null,

@@ -45,3 +45,5 @@ Quick install on OpenWrt after a release is available:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ultracold273/atv-iptv-proxy/main/deploy/openwrt/install.sh | sh
 ```
+
+After installation, set `admin_password_hash` in `/etc/atv-iptv-proxy/config.json` and restart the service. The proxy refuses to start with the example placeholder or the built-in default password hash. See [docs/openwrt.md](docs/openwrt.md) for the exact OpenWrt commands.

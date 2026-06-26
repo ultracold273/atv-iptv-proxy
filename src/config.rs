@@ -1,6 +1,7 @@
 use crate::auth::{hash_secret, ClientToken};
 use crate::stream::StreamProxyConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io;
@@ -34,6 +35,23 @@ pub struct ProviderConfig {
     pub auth_server_url: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelNumberOverride {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub number: u32,
+}
+
+pub type ChannelNumberOverrides = HashMap<String, ChannelNumberOverride>;
+
+pub fn load_channel_number_overrides(path: Option<&Path>) -> io::Result<ChannelNumberOverrides> {
+    let Some(path) = path else {
+        return Ok(ChannelNumberOverrides::default());
+    };
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
@@ -60,10 +78,17 @@ fn default_epg_cache_ttl_seconds() -> u64 {
 impl ProxyConfig {
     pub fn load_or_default(path: &Path) -> io::Result<Self> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("config file not found: {}", path.display()),
+            ));
         }
         let text = fs::read_to_string(path)?;
         serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn validate_startup(&self) -> Result<(), String> {
+        validate_admin_password_hash(&self.admin_password_hash)
     }
 
     pub fn save_atomic(&self, path: &Path) -> io::Result<()> {
@@ -82,6 +107,24 @@ impl ProxyConfig {
     }
 }
 
+fn validate_admin_password_hash(value: &str) -> Result<(), String> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err("admin_password_hash must start with sha256:".to_string());
+    };
+    if hex.contains("replace") {
+        return Err("admin_password_hash is still the example placeholder".to_string());
+    }
+    if value == hash_secret("admin") {
+        return Err("admin_password_hash must not use the default password 'admin'".to_string());
+    }
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(
+            "admin_password_hash must be sha256: followed by 64 hex characters".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -93,4 +136,58 @@ fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("config.json");
     path.with_file_name(format!(".{file_name}.{pid}.{nanos}.tmp"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_channel_code_overrides() {
+        let path =
+            std::env::temp_dir().join(format!("atv-channel-overrides-{}.json", std::process::id()));
+        fs::write(
+            &path,
+            r#"{
+              "ch1": {"name": "News", "number": 5},
+              "ch2": {"number": 9}
+            }"#,
+        )
+        .unwrap();
+
+        let overrides = load_channel_number_overrides(Some(&path)).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(Some(5), overrides.get("ch1").map(|entry| entry.number));
+        assert_eq!(
+            Some("News"),
+            overrides.get("ch1").and_then(|entry| entry.name.as_deref())
+        );
+        assert_eq!(Some(9), overrides.get("ch2").map(|entry| entry.number));
+    }
+
+    #[test]
+    fn startup_rejects_unset_admin_password() {
+        for hash in [
+            "",
+            "sha256:replace-with-hash-from-admin-tool",
+            "sha256:not-hex",
+            &hash_secret("admin"),
+        ] {
+            let config = ProxyConfig {
+                admin_password_hash: hash.to_string(),
+                ..ProxyConfig::default()
+            };
+            assert!(config.validate_startup().is_err());
+        }
+    }
+
+    #[test]
+    fn startup_accepts_configured_admin_password() {
+        let config = ProxyConfig {
+            admin_password_hash: hash_secret("configured-password"),
+            ..ProxyConfig::default()
+        };
+        assert!(config.validate_startup().is_ok());
+    }
 }
