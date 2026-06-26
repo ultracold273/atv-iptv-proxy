@@ -3,7 +3,7 @@ set -eu
 
 REPO="${ATV_PROXY_REPO:-ultracold273/atv-iptv-proxy}"
 TAG="${ATV_PROXY_VERSION:-latest}"
-ARCHIVE_NAME="${ATV_PROXY_ARCHIVE:-atv-iptv-proxy-linux-x86_64.tar.gz}"
+ARCHIVE_NAME="${ATV_PROXY_ARCHIVE:-atv-iptv-proxy-openwrt-x86_64.tar.gz}"
 INSTALL_DIR="${ATV_PROXY_INSTALL_DIR:-/usr/bin}"
 CONFIG_DIR="${ATV_PROXY_CONFIG_DIR:-/etc/atv-iptv-proxy}"
 INIT_PATH="${ATV_PROXY_INIT_PATH:-/etc/init.d/atv-iptv-proxy}"
@@ -72,10 +72,10 @@ if command -v sha256sum >/dev/null 2>&1; then
 fi
 
 tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR"
-[ -f "${TMP_DIR}/atv-iptv-proxy-linux-x86_64" ] || fail "release archive did not contain expected binary"
+[ -f "${TMP_DIR}/atv-iptv-proxy-openwrt-x86_64" ] || fail "release archive did not contain expected binary"
 
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
-mv "${TMP_DIR}/atv-iptv-proxy-linux-x86_64" "$BIN_PATH"
+mv "${TMP_DIR}/atv-iptv-proxy-openwrt-x86_64" "$BIN_PATH"
 chmod 0755 "$BIN_PATH"
 
 log "installing init script from ${RAW_BASE}/deploy/openwrt/atv-iptv-proxy.init"

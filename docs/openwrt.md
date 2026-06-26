@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/ultracold273/atv-iptv-proxy/main/de
 
 The installer:
 
-- downloads `atv-iptv-proxy-linux-x86_64.tar.gz` from GitHub Releases;
+- downloads `atv-iptv-proxy-openwrt-x86_64.tar.gz` from GitHub Releases;
 - verifies the SHA-256 file when `sha256sum` is available;
 - installs `/usr/bin/atv-iptv-proxy`;
 - installs `/etc/init.d/atv-iptv-proxy` from `deploy/openwrt/atv-iptv-proxy.init`;
@@ -41,7 +41,7 @@ Review and edit `/etc/atv-iptv-proxy/config.json` after installation. The servic
 Copy the release binary to the router:
 
 ```sh
-scp atv-iptv-proxy-linux-x86_64 root@192.168.1.1:/usr/bin/atv-iptv-proxy
+scp atv-iptv-proxy-openwrt-x86_64 root@192.168.1.1:/usr/bin/atv-iptv-proxy
 ssh root@192.168.1.1 chmod +x /usr/bin/atv-iptv-proxy
 ```
 
