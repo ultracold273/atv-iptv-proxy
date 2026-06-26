@@ -200,6 +200,50 @@ The raw token is returned only in this response:
 {"token":"atv_living-room-tv_..."}
 ```
 
+Android TV clients can also pair without typing the token on the TV. First, start pairing from the Android app's Home Proxy tab. Then list pending sessions from an admin shell:
+
+```sh
+curl -fsS "$PROXY_URL/admin/api/v1/pairing/sessions?status=pending" \
+  -H "x-admin-password: $ADMIN_PASSWORD"
+```
+
+The response includes the short code shown on the TV:
+
+```json
+{
+  "data": [
+    {
+      "sessionId": "ps_...",
+      "pairingCode": "482913",
+      "deviceName": "Living Room ATV",
+      "deviceType": "android_tv",
+      "appId": "com.example.atv",
+      "appVersion": "1.0.0",
+      "createdAt": 1782543000,
+      "expiresAt": 1782543300
+    }
+  ]
+}
+```
+
+Approve the code and optionally choose the token label shown in the proxy config:
+
+```sh
+curl -fsS -X POST "$PROXY_URL/admin/api/v1/pairing/approve" \
+  -H "x-admin-password: $ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d '{"pairingCode":"482913","deviceLabel":"living-room-tv"}'
+```
+
+The Android client receives the generated token through its pending pairing session. To reject a pending code instead:
+
+```sh
+curl -fsS -X POST "$PROXY_URL/admin/api/v1/pairing/reject" \
+  -H "x-admin-password: $ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d '{"pairingCode":"482913"}'
+```
+
 If `jq` is available, capture the token for testing:
 
 ```sh
