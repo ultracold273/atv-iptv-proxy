@@ -30,7 +30,7 @@ Acceptance criteria:
 
 - **FR-001**: The proxy MUST expose `GET /api/v1/epg/day?channelCode=...&dateOffset=...`.
 - **FR-002**: The proxy MUST require a valid bearer token for EPG endpoints.
-- **FR-003**: The proxy MUST support `dateOffset` values `-1`, `0`, and `1`.
+- **FR-003**: The proxy MUST support CTC `dateOffset` values where `-1` means tomorrow, `0` means today, and `1` means yesterday.
 - **FR-004**: The proxy MUST fetch CTC `prevue_list.jsp` using the authenticated EPG session.
 - **FR-005**: The proxy MUST normalize CTC program entries into `code`, `name`, `start`, `end`, `isLive`, and `isReplayable`.
 - **FR-006**: The proxy MUST cache EPG results by `(channelCode, dateOffset)` with a configurable TTL.

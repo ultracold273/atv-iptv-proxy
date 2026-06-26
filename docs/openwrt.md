@@ -145,7 +145,7 @@ GET /api/v1/epg/day?channelCode=ch1&dateOffset=0
 Authorization: Bearer atv_living-room_...
 ```
 
-`dateOffset` supports `-1`, `0`, and `1`. Responses use normalized program JSON with `start` and `end` as ISO-8601 strings. The proxy caches EPG data by channel and date offset, and may return stale cached guide data if the IPTV backend is temporarily unavailable.
+`dateOffset` follows the CTC backend `dateindex` convention: `-1` means tomorrow, `0` means today, and `1` means yesterday. Responses use normalized program JSON with `start` and `end` as ISO-8601 strings. The proxy caches EPG data by channel and date offset, and may return stale cached guide data if the IPTV backend is temporarily unavailable.
 
 ## Admin API Examples
 
