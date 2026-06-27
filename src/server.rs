@@ -2,6 +2,10 @@ use crate::auth::{find_valid_token, generate_token, hash_secret, verify_secret, 
 use crate::backend;
 use crate::cache::{now_secs, ChannelCache, EpgCache, EpgCacheKey};
 use crate::config::{load_channel_number_overrides, ProxyConfig};
+use crate::pairing::{
+    ApprovePairingRequest, CreatePairingRequest, PairingDecisionResponse, PairingError,
+    PairingStore, RejectPairingRequest,
+};
 use crate::stream::StreamProxyConfig;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +21,7 @@ pub struct AppState {
     config: Mutex<ProxyConfig>,
     cache: Mutex<ChannelCache>,
     epg_cache: Mutex<EpgCache>,
+    pairing: Mutex<PairingStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +107,7 @@ pub fn run(args: ServerArgs) -> Result<(), String> {
         config: Mutex::new(config),
         cache: Mutex::new(ChannelCache::default()),
         epg_cache: Mutex::new(EpgCache::default()),
+        pairing: Mutex::new(PairingStore::default()),
     });
     serve(&listen, state)
 }
@@ -160,8 +166,16 @@ pub fn handle_request(raw: &str, state: &AppState) -> String {
         ("GET", "/admin") => admin_page(state),
         ("POST", "/admin/config") => admin_config(&request, state),
         ("POST", "/admin/tokens") => admin_create_token(&request, state),
+        ("DELETE", "/admin/tokens") => admin_delete_token(&request, state),
+        ("GET", "/admin/api/v1/pairing/sessions") => admin_pairing_sessions(&request, state),
+        ("POST", "/admin/api/v1/pairing/approve") => admin_pairing_approve(&request, state),
+        ("POST", "/admin/api/v1/pairing/reject") => admin_pairing_reject(&request, state),
+        ("POST", "/api/v1/pairing/sessions") => pairing_create(&request, state),
         ("GET", "/api/v1/channels") => channels(&request, state),
         ("GET", "/api/v1/epg/day") => epg_day(&request, state),
+        _ if request.method == "GET" && request.path.starts_with("/api/v1/pairing/sessions/") => {
+            pairing_poll(&request, state)
+        }
         _ => json_error(404, "not_found", "not found"),
     };
     eprintln!(
@@ -250,6 +264,173 @@ fn admin_create_token(request: &Request, state: &AppState) -> String {
         cfg.tokens.len()
     );
     json(200, &serde_json::json!({"token": raw}))
+}
+
+fn admin_delete_token(request: &Request, state: &AppState) -> String {
+    if !authorized_admin(request, state) {
+        eprintln!("admin_token_delete: unauthorized");
+        return json_error(401, "admin_unauthorized", "admin password required");
+    }
+    let form = parse_form(&request.body);
+    let Some(name) = request.query.get("name").or_else(|| form.get("name")) else {
+        return json_error(400, "missing_token_name", "name is required");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return json_error(400, "missing_token_name", "name is required");
+    }
+
+    let mut cfg = state.config.lock().unwrap();
+    let before = cfg.tokens.len();
+    cfg.tokens.retain(|token| token.name != name);
+    let deleted_count = before.saturating_sub(cfg.tokens.len());
+    if deleted_count == 0 {
+        return json_error(404, "token_not_found", "token name not found");
+    }
+    if let Err(e) = cfg.save_atomic(&state.config_path) {
+        eprintln!("admin_token_delete: save_failed name={name} error={e}");
+        return json_error(500, "config_save_failed", &e.to_string());
+    }
+    eprintln!(
+        "admin_token_delete: deleted name={name} deleted_count={} remaining_tokens={}",
+        deleted_count,
+        cfg.tokens.len()
+    );
+    json(
+        200,
+        &serde_json::json!({"ok": true, "deletedCount": deleted_count}),
+    )
+}
+
+fn pairing_create(request: &Request, state: &AppState) -> String {
+    let parsed = match serde_json::from_str::<CreatePairingRequest>(&request.body) {
+        Ok(parsed) => parsed,
+        Err(e) => return json_error(400, "bad_request", &e.to_string()),
+    };
+    match state.pairing.lock().unwrap().create(parsed, now_secs()) {
+        Ok(response) => json(200, &response),
+        Err(e) => pairing_error(e),
+    }
+}
+
+fn pairing_poll(request: &Request, state: &AppState) -> String {
+    let Some(session_id) = request.path.strip_prefix("/api/v1/pairing/sessions/") else {
+        return json_error(404, "not_found", "not found");
+    };
+    let Some(client_nonce) = request.headers.get("x-client-nonce") else {
+        return json_error(401, "invalid_client_nonce", "valid client nonce required");
+    };
+    match state
+        .pairing
+        .lock()
+        .unwrap()
+        .poll(session_id, client_nonce, now_secs())
+    {
+        Ok(response) => json(200, &response),
+        Err(e) => pairing_error(e),
+    }
+}
+
+fn admin_pairing_sessions(request: &Request, state: &AppState) -> String {
+    if !authorized_admin(request, state) {
+        eprintln!("admin_pairing_sessions: unauthorized");
+        return json_error(401, "admin_unauthorized", "admin password required");
+    }
+    let status = request
+        .query
+        .get("status")
+        .map(String::as_str)
+        .unwrap_or("pending");
+    if status != "pending" {
+        return json_error(
+            400,
+            "unsupported_status",
+            "only pending pairing sessions can be listed",
+        );
+    }
+    let response = state.pairing.lock().unwrap().pending_sessions(now_secs());
+    json(200, &response)
+}
+
+fn admin_pairing_approve(request: &Request, state: &AppState) -> String {
+    if !authorized_admin(request, state) {
+        eprintln!("admin_pairing_approve: unauthorized");
+        return json_error(401, "admin_unauthorized", "admin password required");
+    }
+    let parsed = match serde_json::from_str::<ApprovePairingRequest>(&request.body) {
+        Ok(parsed) => parsed,
+        Err(e) => return json_error(400, "bad_request", &e.to_string()),
+    };
+    let candidate = match state.pairing.lock().unwrap().approval_candidate(
+        &parsed.pairing_code,
+        parsed.device_label.as_deref(),
+        now_secs(),
+    ) {
+        Ok(candidate) => candidate,
+        Err(e) => return pairing_error(e),
+    };
+    let raw = match generate_token(&candidate.token_name) {
+        Ok(token) => token,
+        Err(e) => return json_error(500, "token_generation_failed", &e.to_string()),
+    };
+    {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.tokens.push(ClientToken {
+            name: candidate.token_name.clone(),
+            hash: hash_secret(&raw),
+            created_at: crate::auth::now_secs(),
+            last_seen_at: None,
+            enabled: true,
+        });
+        if let Err(e) = cfg.save_atomic(&state.config_path) {
+            return json_error(500, "config_save_failed", &e.to_string());
+        }
+    }
+    if let Err(e) = state
+        .pairing
+        .lock()
+        .unwrap()
+        .approve(&candidate.session_id, raw)
+    {
+        return pairing_error(e);
+    }
+    json(
+        200,
+        &PairingDecisionResponse {
+            status: "approved",
+            client_id: Some(candidate.session_id),
+        },
+    )
+}
+
+fn admin_pairing_reject(request: &Request, state: &AppState) -> String {
+    if !authorized_admin(request, state) {
+        eprintln!("admin_pairing_reject: unauthorized");
+        return json_error(401, "admin_unauthorized", "admin password required");
+    }
+    let parsed = match serde_json::from_str::<RejectPairingRequest>(&request.body) {
+        Ok(parsed) => parsed,
+        Err(e) => return json_error(400, "bad_request", &e.to_string()),
+    };
+    match state
+        .pairing
+        .lock()
+        .unwrap()
+        .reject(&parsed.pairing_code, now_secs())
+    {
+        Ok(()) => json(
+            200,
+            &PairingDecisionResponse {
+                status: "rejected",
+                client_id: None,
+            },
+        ),
+        Err(e) => pairing_error(e),
+    }
+}
+
+fn pairing_error(error: PairingError) -> String {
+    json_error(error.status, error.code, error.message)
 }
 
 fn channels(request: &Request, state: &AppState) -> String {
@@ -637,7 +818,15 @@ mod tests {
             config: Mutex::new(config),
             cache: Mutex::new(ChannelCache::default()),
             epg_cache: Mutex::new(EpgCache::default()),
+            pairing: Mutex::new(PairingStore::default()),
         }
+    }
+
+    fn response_body(response: &str) -> &str {
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or("")
     }
 
     #[test]
@@ -703,6 +892,152 @@ mod tests {
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("atv_living-room_"));
         assert_eq!(1, state.config.lock().unwrap().tokens.len());
+    }
+
+    #[test]
+    fn admin_can_delete_token_by_name() {
+        let mut cfg = ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        };
+        cfg.tokens.push(ClientToken {
+            name: "living-room".into(),
+            hash: hash_secret("token-1"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        cfg.tokens.push(ClientToken {
+            name: "bedroom".into(),
+            hash: hash_secret("token-2"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        let state = state(cfg);
+
+        let resp = handle_request(
+            "DELETE /admin/tokens?name=living-room HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("\"deletedCount\":1"));
+        let tokens = &state.config.lock().unwrap().tokens;
+        assert_eq!(1, tokens.len());
+        assert_eq!("bedroom", tokens[0].name);
+    }
+
+    #[test]
+    fn admin_delete_token_requires_name() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        });
+
+        let resp = handle_request(
+            "DELETE /admin/tokens HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("400 Bad Request"));
+        assert!(resp.contains("missing_token_name"));
+    }
+
+    #[test]
+    fn admin_delete_token_returns_not_found() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        });
+
+        let resp = handle_request(
+            "DELETE /admin/tokens?name=missing HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("404 Not Found"));
+        assert!(resp.contains("token_not_found"));
+    }
+
+    #[test]
+    fn pairing_approve_by_code_creates_client_token() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        });
+
+        let create = handle_request(
+            "POST /api/v1/pairing/sessions HTTP/1.1\r\ncontent-type: application/json\r\n\r\n{\"deviceName\":\"Living Room ATV\",\"deviceType\":\"android_tv\",\"appId\":\"com.example.atv\",\"appVersion\":\"1\",\"clientNonce\":\"nonce\"}",
+            &state,
+        );
+        assert!(create.contains("200 OK"));
+        let created: serde_json::Value = serde_json::from_str(response_body(&create)).unwrap();
+        let session_id = created["sessionId"].as_str().unwrap();
+        let pairing_code = created["pairingCode"].as_str().unwrap();
+
+        let list = handle_request(
+            "GET /admin/api/v1/pairing/sessions?status=pending HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+        assert!(list.contains("200 OK"));
+        assert!(list.contains(pairing_code));
+        assert!(list.contains("Living Room ATV"));
+
+        let approve = handle_request(
+            &format!(
+                "POST /admin/api/v1/pairing/approve HTTP/1.1\r\nx-admin-password: pw\r\ncontent-type: application/json\r\n\r\n{{\"pairingCode\":\"{}\",\"deviceLabel\":\"Den TV\"}}",
+                pairing_code
+            ),
+            &state,
+        );
+        assert!(approve.contains("200 OK"));
+        assert_eq!(1, state.config.lock().unwrap().tokens.len());
+        assert_eq!("Den TV", state.config.lock().unwrap().tokens[0].name);
+
+        let poll = handle_request(
+            &format!(
+                "GET /api/v1/pairing/sessions/{} HTTP/1.1\r\nx-client-nonce: nonce\r\n\r\n",
+                session_id
+            ),
+            &state,
+        );
+        assert!(poll.contains("200 OK"));
+        assert!(poll.contains("\"status\":\"approved\""));
+        assert!(poll.contains("atv_dentv_"));
+    }
+
+    #[test]
+    fn pairing_reject_by_code_is_visible_to_client() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        });
+        let create = handle_request(
+            "POST /api/v1/pairing/sessions HTTP/1.1\r\ncontent-type: application/json\r\n\r\n{\"clientNonce\":\"nonce\"}",
+            &state,
+        );
+        let created: serde_json::Value = serde_json::from_str(response_body(&create)).unwrap();
+        let session_id = created["sessionId"].as_str().unwrap();
+        let pairing_code = created["pairingCode"].as_str().unwrap();
+
+        let reject = handle_request(
+            &format!(
+                "POST /admin/api/v1/pairing/reject HTTP/1.1\r\nx-admin-password: pw\r\ncontent-type: application/json\r\n\r\n{{\"pairingCode\":\"{}\"}}",
+                pairing_code
+            ),
+            &state,
+        );
+        assert!(reject.contains("200 OK"));
+
+        let poll = handle_request(
+            &format!(
+                "GET /api/v1/pairing/sessions/{} HTTP/1.1\r\nx-client-nonce: nonce\r\n\r\n",
+                session_id
+            ),
+            &state,
+        );
+        assert!(poll.contains("\"status\":\"rejected\""));
     }
 
     #[test]

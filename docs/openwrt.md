@@ -200,6 +200,132 @@ The raw token is returned only in this response:
 {"token":"atv_living-room-tv_..."}
 ```
 
+Delete all tokens with a matching client name:
+
+```sh
+curl -fsS -X DELETE "$PROXY_URL/admin/tokens?name=living-room-tv" \
+  -H "x-admin-password: $ADMIN_PASSWORD"
+```
+
+The response reports how many matching tokens were removed:
+
+```json
+{"deletedCount":1,"ok":true}
+```
+
+Android TV clients can also pair without typing the token on the TV. First, start pairing from the Android app's Home Proxy tab. Then list pending sessions from an admin shell:
+
+```sh
+curl -fsS "$PROXY_URL/admin/api/v1/pairing/sessions?status=pending" \
+  -H "x-admin-password: $ADMIN_PASSWORD"
+```
+
+The response includes the short code shown on the TV:
+
+```json
+{
+  "data": [
+    {
+      "sessionId": "ps_...",
+      "pairingCode": "482913",
+      "deviceName": "Living Room ATV",
+      "deviceType": "android_tv",
+      "appId": "com.example.atv",
+      "appVersion": "1.0.0",
+      "createdAt": 1782543000,
+      "expiresAt": 1782543300
+    }
+  ]
+}
+```
+
+Approve the code and optionally choose the token label shown in the proxy config:
+
+```sh
+curl -fsS -X POST "$PROXY_URL/admin/api/v1/pairing/approve" \
+  -H "x-admin-password: $ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d '{"pairingCode":"482913","deviceLabel":"living-room-tv"}'
+```
+
+The Android client receives the generated token through its pending pairing session. To reject a pending code instead:
+
+```sh
+curl -fsS -X POST "$PROXY_URL/admin/api/v1/pairing/reject" \
+  -H "x-admin-password: $ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d '{"pairingCode":"482913"}'
+```
+
+To test the full pairing flow with only `curl`, simulate the Android client in one shell and the admin approval in another shell. The client first creates a pairing session:
+
+```sh
+PROXY_URL="http://192.168.1.1:8088"
+CLIENT_NONCE="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+
+PAIRING_RESPONSE="$(curl -fsS -X POST "$PROXY_URL/api/v1/pairing/sessions" \
+  -H "Content-Type: application/json" \
+  -d "{\"deviceName\":\"curl-test-tv\",\"deviceType\":\"android_tv\",\"appId\":\"curl\",\"appVersion\":\"test\",\"clientNonce\":\"$CLIENT_NONCE\"}")"
+
+echo "$PAIRING_RESPONSE"
+SESSION_ID="$(echo "$PAIRING_RESPONSE" | jq -r '.sessionId')"
+PAIRING_CODE="$(echo "$PAIRING_RESPONSE" | jq -r '.pairingCode')"
+echo "session=$SESSION_ID code=$PAIRING_CODE"
+```
+
+Before approval, polling should show `pending`:
+
+```sh
+curl -fsS "$PROXY_URL/api/v1/pairing/sessions/$SESSION_ID" \
+  -H "X-Client-Nonce: $CLIENT_NONCE"
+```
+
+From the admin side, list pending sessions and approve the displayed code:
+
+```sh
+ADMIN_PASSWORD="replace-with-admin-password"
+
+curl -fsS "$PROXY_URL/admin/api/v1/pairing/sessions?status=pending" \
+  -H "x-admin-password: $ADMIN_PASSWORD"
+
+curl -fsS -X POST "$PROXY_URL/admin/api/v1/pairing/approve" \
+  -H "x-admin-password: $ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d "{\"pairingCode\":\"$PAIRING_CODE\",\"deviceLabel\":\"curl-test-tv\"}"
+```
+
+Poll again from the client side. The approved response contains the bearer token exactly once, so capture it for testing:
+
+```sh
+APPROVED_RESPONSE="$(curl -fsS "$PROXY_URL/api/v1/pairing/sessions/$SESSION_ID" \
+  -H "X-Client-Nonce: $CLIENT_NONCE")"
+
+echo "$APPROVED_RESPONSE"
+TOKEN="$(echo "$APPROVED_RESPONSE" | jq -r '.accessToken')"
+```
+
+Use the paired token with the normal client APIs:
+
+```sh
+curl -fsS "$PROXY_URL/api/v1/channels" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -fsS "$PROXY_URL/api/v1/epg/day?channelCode=ch1&dateOffset=0" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+To test rejection instead of approval, create a fresh pairing session and reject its code:
+
+```sh
+curl -fsS -X POST "$PROXY_URL/admin/api/v1/pairing/reject" \
+  -H "x-admin-password: $ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d "{\"pairingCode\":\"$PAIRING_CODE\"}"
+
+curl -fsS "$PROXY_URL/api/v1/pairing/sessions/$SESSION_ID" \
+  -H "X-Client-Nonce: $CLIENT_NONCE"
+```
+
 If `jq` is available, capture the token for testing:
 
 ```sh
