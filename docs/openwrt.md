@@ -200,6 +200,19 @@ The raw token is returned only in this response:
 {"token":"atv_living-room-tv_..."}
 ```
 
+Delete all tokens with a matching client name:
+
+```sh
+curl -fsS -X DELETE "$PROXY_URL/admin/tokens?name=living-room-tv" \
+  -H "x-admin-password: $ADMIN_PASSWORD"
+```
+
+The response reports how many matching tokens were removed:
+
+```json
+{"deletedCount":1,"ok":true}
+```
+
 Android TV clients can also pair without typing the token on the TV. First, start pairing from the Android app's Home Proxy tab. Then list pending sessions from an admin shell:
 
 ```sh

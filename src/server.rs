@@ -166,6 +166,7 @@ pub fn handle_request(raw: &str, state: &AppState) -> String {
         ("GET", "/admin") => admin_page(state),
         ("POST", "/admin/config") => admin_config(&request, state),
         ("POST", "/admin/tokens") => admin_create_token(&request, state),
+        ("DELETE", "/admin/tokens") => admin_delete_token(&request, state),
         ("GET", "/admin/api/v1/pairing/sessions") => admin_pairing_sessions(&request, state),
         ("POST", "/admin/api/v1/pairing/approve") => admin_pairing_approve(&request, state),
         ("POST", "/admin/api/v1/pairing/reject") => admin_pairing_reject(&request, state),
@@ -263,6 +264,42 @@ fn admin_create_token(request: &Request, state: &AppState) -> String {
         cfg.tokens.len()
     );
     json(200, &serde_json::json!({"token": raw}))
+}
+
+fn admin_delete_token(request: &Request, state: &AppState) -> String {
+    if !authorized_admin(request, state) {
+        eprintln!("admin_token_delete: unauthorized");
+        return json_error(401, "admin_unauthorized", "admin password required");
+    }
+    let form = parse_form(&request.body);
+    let Some(name) = request.query.get("name").or_else(|| form.get("name")) else {
+        return json_error(400, "missing_token_name", "name is required");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return json_error(400, "missing_token_name", "name is required");
+    }
+
+    let mut cfg = state.config.lock().unwrap();
+    let before = cfg.tokens.len();
+    cfg.tokens.retain(|token| token.name != name);
+    let deleted_count = before.saturating_sub(cfg.tokens.len());
+    if deleted_count == 0 {
+        return json_error(404, "token_not_found", "token name not found");
+    }
+    if let Err(e) = cfg.save_atomic(&state.config_path) {
+        eprintln!("admin_token_delete: save_failed name={name} error={e}");
+        return json_error(500, "config_save_failed", &e.to_string());
+    }
+    eprintln!(
+        "admin_token_delete: deleted name={name} deleted_count={} remaining_tokens={}",
+        deleted_count,
+        cfg.tokens.len()
+    );
+    json(
+        200,
+        &serde_json::json!({"ok": true, "deletedCount": deleted_count}),
+    )
 }
 
 fn pairing_create(request: &Request, state: &AppState) -> String {
@@ -855,6 +892,72 @@ mod tests {
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("atv_living-room_"));
         assert_eq!(1, state.config.lock().unwrap().tokens.len());
+    }
+
+    #[test]
+    fn admin_can_delete_token_by_name() {
+        let mut cfg = ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        };
+        cfg.tokens.push(ClientToken {
+            name: "living-room".into(),
+            hash: hash_secret("token-1"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        cfg.tokens.push(ClientToken {
+            name: "bedroom".into(),
+            hash: hash_secret("token-2"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        let state = state(cfg);
+
+        let resp = handle_request(
+            "DELETE /admin/tokens?name=living-room HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("\"deletedCount\":1"));
+        let tokens = &state.config.lock().unwrap().tokens;
+        assert_eq!(1, tokens.len());
+        assert_eq!("bedroom", tokens[0].name);
+    }
+
+    #[test]
+    fn admin_delete_token_requires_name() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        });
+
+        let resp = handle_request(
+            "DELETE /admin/tokens HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("400 Bad Request"));
+        assert!(resp.contains("missing_token_name"));
+    }
+
+    #[test]
+    fn admin_delete_token_returns_not_found() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        });
+
+        let resp = handle_request(
+            "DELETE /admin/tokens?name=missing HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("404 Not Found"));
+        assert!(resp.contains("token_not_found"));
     }
 
     #[test]
