@@ -29,12 +29,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Version tags create a GitHub Release with a Linux x86_64 binary tarball:
+Releases use the Rust crate version in `Cargo.toml` as the source of truth. To cut a new release, bump `[package].version`, merge to `main`, and the release workflow creates the matching tag and GitHub Release:
 
-```sh
-git tag v0.1.0
-git push origin v0.1.0
+```toml
+[package]
+version = "0.2.1"
 ```
+
+If the matching tag already exists, the workflow skips release creation on push. Manual workflow dispatch rebuilds the release for the current `Cargo.toml` version.
 
 The release artifact is intended as the initial OpenWrt x86_64 deployment binary. Native OpenWrt package/feed publishing can be added once the service layout stabilizes.
 
