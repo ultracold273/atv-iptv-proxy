@@ -238,7 +238,7 @@ impl PairingStore {
                 expires_at: session.expires_at,
             })
             .collect::<Vec<_>>();
-        data.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        data.sort_by_key(|session| session.created_at);
         PendingPairingSessionsResponse { data }
     }
 
