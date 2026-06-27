@@ -1,7 +1,7 @@
 use crate::auth::{find_valid_token, generate_token, hash_secret, verify_secret, ClientToken};
 use crate::backend;
 use crate::cache::{now_secs, ChannelCache, EpgCache, EpgCacheKey};
-use crate::config::{load_channel_number_overrides, ProxyConfig};
+use crate::config::{load_channel_number_overrides, ProviderConfig, ProxyConfig};
 use crate::pairing::{
     ApprovePairingRequest, CreatePairingRequest, PairingDecisionResponse, PairingError,
     PairingStore, RejectPairingRequest,
@@ -21,7 +21,14 @@ pub struct AppState {
     config: Mutex<ProxyConfig>,
     cache: Mutex<ChannelCache>,
     epg_cache: Mutex<EpgCache>,
+    ctc_session: Mutex<Option<CachedCtcSession>>,
     pairing: Mutex<PairingStore>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCtcSession {
+    provider: ProviderConfig,
+    session: crate::ctc::LoginSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +114,7 @@ pub fn run(args: ServerArgs) -> Result<(), String> {
         config: Mutex::new(config),
         cache: Mutex::new(ChannelCache::default()),
         epg_cache: Mutex::new(EpgCache::default()),
+        ctc_session: Mutex::new(None),
         pairing: Mutex::new(PairingStore::default()),
     });
     serve(&listen, state)
@@ -468,7 +476,9 @@ fn channels(request: &Request, state: &AppState) -> String {
             client_name
         );
         match load_channel_number_overrides(state.channel_number_overrides_path.as_deref()) {
-            Ok(overrides) => crate::ctc::fetch_channels(&provider, &stream_cfg, &overrides),
+            Ok(overrides) => {
+                fetch_ctc_channels_with_cached_session(state, &provider, &stream_cfg, &overrides)
+            }
             Err(e) => Err(format!("channel number overrides load failed: {e}")),
         }
     } else if let Some(url) = backend_url {
@@ -514,6 +524,104 @@ fn channels(request: &Request, state: &AppState) -> String {
                 );
                 json_error(503, "backend_unavailable", &e)
             }
+        }
+    }
+}
+
+fn cached_ctc_session(
+    state: &AppState,
+    provider: &ProviderConfig,
+) -> Result<crate::ctc::LoginSession, String> {
+    let mut cached = state.ctc_session.lock().unwrap();
+    if let Some(entry) = cached.as_ref().filter(|entry| entry.provider == *provider) {
+        eprintln!("ctc_session: cache_hit user_id={}", provider.user_id);
+        return Ok(entry.session.clone());
+    }
+
+    if cached.is_some() {
+        eprintln!(
+            "ctc_session: provider_changed user_id={} action=relogin",
+            provider.user_id
+        );
+    } else {
+        eprintln!(
+            "ctc_session: cache_miss user_id={} action=login",
+            provider.user_id
+        );
+    }
+    let session = crate::ctc::login(provider)?;
+    *cached = Some(CachedCtcSession {
+        provider: provider.clone(),
+        session: session.clone(),
+    });
+    Ok(session)
+}
+
+fn refresh_ctc_session(
+    state: &AppState,
+    provider: &ProviderConfig,
+) -> Result<crate::ctc::LoginSession, String> {
+    eprintln!(
+        "ctc_session: refresh user_id={} action=relogin",
+        provider.user_id
+    );
+    let session = crate::ctc::login(provider)?;
+    *state.ctc_session.lock().unwrap() = Some(CachedCtcSession {
+        provider: provider.clone(),
+        session: session.clone(),
+    });
+    Ok(session)
+}
+
+fn clear_ctc_session(state: &AppState, provider: &ProviderConfig) {
+    let mut cached = state.ctc_session.lock().unwrap();
+    if cached
+        .as_ref()
+        .is_some_and(|entry| entry.provider == *provider)
+    {
+        eprintln!("ctc_session: invalidate user_id={}", provider.user_id);
+        *cached = None;
+    }
+}
+
+fn fetch_ctc_channels_with_cached_session(
+    state: &AppState,
+    provider: &ProviderConfig,
+    stream_cfg: &StreamProxyConfig,
+    overrides: &crate::config::ChannelNumberOverrides,
+) -> Result<Vec<crate::cache::Channel>, String> {
+    let session = cached_ctc_session(state, provider)?;
+    match crate::ctc::fetch_channels_with_session(&session, stream_cfg, overrides) {
+        Ok(channels) => Ok(channels),
+        Err(first_error) => {
+            clear_ctc_session(state, provider);
+            eprintln!(
+                "ctc_session: retry_after_failure operation=fetch_channels user_id={} error={}",
+                provider.user_id, first_error
+            );
+            let fresh = refresh_ctc_session(state, provider)?;
+            crate::ctc::fetch_channels_with_session(&fresh, stream_cfg, overrides)
+        }
+    }
+}
+
+fn fetch_ctc_programs_with_cached_session(
+    state: &AppState,
+    provider: &ProviderConfig,
+    channel_code: &str,
+    date_offset: i32,
+) -> Result<Vec<crate::cache::Program>, String> {
+    let session = cached_ctc_session(state, provider)?;
+    match crate::ctc::fetch_programs_with_session(&session, channel_code, date_offset) {
+        Ok(programs) => Ok(programs),
+        Err(first_error) => {
+            clear_ctc_session(state, provider);
+            eprintln!(
+                "ctc_session: retry_after_failure operation=fetch_programs user_id={} channel={} date_offset={} error={}",
+                provider.user_id, channel_code, date_offset, first_error
+            );
+            let fresh = refresh_ctc_session(state, provider)?;
+            crate::ctc::fetch_programs_with_session(&fresh, channel_code, date_offset)
         }
     }
 }
@@ -636,7 +744,7 @@ fn epg_day(request: &Request, state: &AppState) -> String {
         "epg_day: cache_miss client={} channel={} date_offset={} source=provider",
         client_name, channel_code, date_offset
     );
-    match crate::ctc::fetch_programs(&provider, channel_code, date_offset) {
+    match fetch_ctc_programs_with_cached_session(state, &provider, channel_code, date_offset) {
         Ok(programs) => {
             let count = programs.len();
             let mut cache = state.epg_cache.lock().unwrap();
@@ -818,6 +926,7 @@ mod tests {
             config: Mutex::new(config),
             cache: Mutex::new(ChannelCache::default()),
             epg_cache: Mutex::new(EpgCache::default()),
+            ctc_session: Mutex::new(None),
             pairing: Mutex::new(PairingStore::default()),
         }
     }
@@ -1189,5 +1298,71 @@ mod tests {
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("\"code\":\"p1\""));
         assert!(resp.contains("\"isLive\":true"));
+    }
+
+    #[test]
+    fn cached_ctc_session_reuses_matching_provider() {
+        let provider = ProviderConfig {
+            user_id: "u1".into(),
+            password: "pw".into(),
+            stb_id: "stb".into(),
+            local_ip: "192.0.2.1".into(),
+            local_mac: "00:11:22:33:44:55".into(),
+            auth_server_url: "http://auth".into(),
+        };
+        let state = state(ProxyConfig::default());
+        *state.ctc_session.lock().unwrap() = Some(CachedCtcSession {
+            provider: provider.clone(),
+            session: crate::ctc::LoginSession {
+                epg_lb_base: "http://epg/iptvepg/function/".into(),
+                jsession_id: "J1".into(),
+                user_token: "UT1".into(),
+                user_id: provider.user_id.clone(),
+            },
+        });
+
+        let session = cached_ctc_session(&state, &provider).unwrap();
+
+        assert_eq!("J1", session.jsession_id);
+    }
+
+    #[test]
+    fn clear_ctc_session_keeps_different_provider_session() {
+        let provider = ProviderConfig {
+            user_id: "u1".into(),
+            password: "pw".into(),
+            stb_id: "stb".into(),
+            local_ip: "192.0.2.1".into(),
+            local_mac: "00:11:22:33:44:55".into(),
+            auth_server_url: "http://auth".into(),
+        };
+        let other_provider = ProviderConfig {
+            user_id: "u2".into(),
+            ..provider.clone()
+        };
+        let state = state(ProxyConfig::default());
+        *state.ctc_session.lock().unwrap() = Some(CachedCtcSession {
+            provider: other_provider,
+            session: crate::ctc::LoginSession {
+                epg_lb_base: "http://epg/iptvepg/function/".into(),
+                jsession_id: "J2".into(),
+                user_token: "UT2".into(),
+                user_id: "u2".into(),
+            },
+        });
+
+        clear_ctc_session(&state, &provider);
+
+        assert_eq!(
+            "J2",
+            state
+                .ctc_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .session
+                .jsession_id
+        );
     }
 }

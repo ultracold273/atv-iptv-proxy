@@ -24,6 +24,14 @@ pub fn fetch_channels(
 ) -> Result<Vec<Channel>, String> {
     eprintln!("ctc: fetch_channels start user_id={}", provider.user_id);
     let session = login(provider)?;
+    fetch_channels_with_session(&session, stream, overrides)
+}
+
+pub fn fetch_channels_with_session(
+    session: &LoginSession,
+    stream: &StreamProxyConfig,
+    overrides: &ChannelNumberOverrides,
+) -> Result<Vec<Channel>, String> {
     eprintln!("ctc: fetch_channels requesting_frameset");
     let frameset = post_form(
         &format!("{}frameset_builder.jsp", session.epg_lb_base),
@@ -42,7 +50,7 @@ pub fn fetch_channels(
     if raw.is_empty() {
         return Err("frameset_builder returned no channels".to_string());
     }
-    let mapping = fetch_mapping(&session).unwrap_or_default();
+    let mapping = fetch_mapping(session).unwrap_or_default();
     eprintln!("ctc: fetch_channels mapping count={}", mapping.len());
     let by_user_channel: HashMap<String, u32> = mapping
         .into_iter()

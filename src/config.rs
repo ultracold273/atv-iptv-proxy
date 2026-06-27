@@ -25,7 +25,7 @@ pub struct ProxyConfig {
     pub tokens: Vec<ClientToken>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderConfig {
     pub user_id: String,
     pub password: String,
