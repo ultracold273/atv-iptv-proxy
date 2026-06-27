@@ -2,8 +2,13 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/release.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,44 +16,95 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: atv-iptv-proxy
+  TARGET: x86_64-unknown-linux-musl
 
 jobs:
-  build-openwrt-x86_64:
-    name: Build OpenWrt x86_64 release
+  release:
+    name: Tag, build, and release OpenWrt x86_64
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ env.TARGET }}
+
+      - name: Read crate version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "${{ env.BIN_NAME }}") | .version')
+          tag="v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Detected ${tag} from Cargo.toml"
+
+      - name: Check if tag exists
+        id: tag
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify --quiet "refs/tags/${{ steps.version.outputs.tag }}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.version.outputs.tag }} already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.version.outputs.tag }} does not exist"
+          fi
+
+      - name: Skip existing tag on push
+        if: github.event_name == 'push' && steps.tag.outputs.exists == 'true'
+        run: |
+          echo "Skipping release because ${{ steps.version.outputs.tag }} already exists."
+          echo "Bump package.version in Cargo.toml to create a new release."
 
       - name: Cache cargo
+        if: github.event_name == 'workflow_dispatch' || steps.tag.outputs.exists == 'false'
         uses: Swatinem/rust-cache@v2
 
       - name: Install musl linker
+        if: github.event_name == 'workflow_dispatch' || steps.tag.outputs.exists == 'false'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Run tests
+        if: github.event_name == 'workflow_dispatch' || steps.tag.outputs.exists == 'false'
         run: cargo test --locked
 
       - name: Build release binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+        if: github.event_name == 'workflow_dispatch' || steps.tag.outputs.exists == 'false'
+        run: cargo build --release --locked --target "${TARGET}"
 
       - name: Package artifact
-        shell: bash
+        if: github.event_name == 'workflow_dispatch' || steps.tag.outputs.exists == 'false'
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "target/x86_64-unknown-linux-musl/release/${BIN_NAME}" "dist/${BIN_NAME}-openwrt-x86_64"
-          tar -C dist -czf "dist/${BIN_NAME}-openwrt-x86_64.tar.gz" "${BIN_NAME}-openwrt-x86_64"
-          (cd dist && shasum -a 256 "${BIN_NAME}-openwrt-x86_64.tar.gz" > "${BIN_NAME}-openwrt-x86_64.tar.gz.sha256")
+          binary="${BIN_NAME}-openwrt-x86_64"
+          archive="${binary}.tar.gz"
+          cp "target/${TARGET}/release/${BIN_NAME}" "dist/${binary}"
+          tar -C dist -czf "dist/${archive}" "${binary}"
+          (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+
+      - name: Create and push tag
+        if: github.event_name == 'push' && steps.tag.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.tag }}"
 
       - name: Publish GitHub release
+        if: github.event_name == 'workflow_dispatch' || steps.tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          overwrite_files: true
           files: |
             dist/atv-iptv-proxy-openwrt-x86_64.tar.gz
             dist/atv-iptv-proxy-openwrt-x86_64.tar.gz.sha256
