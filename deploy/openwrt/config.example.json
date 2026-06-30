@@ -12,6 +12,15 @@
     "local_mac": "00:00:5E:00:53:01",
     "auth_server_url": "http://provider.example:8298"
   },
+  "pairing": {
+    "session_ttl_seconds": 300,
+    "poll_interval_seconds": 2,
+    "create_rate_limit": {
+      "enabled": false,
+      "window_seconds": 60,
+      "max_requests": 10
+    }
+  },
   "stream": {
     "udpxy_base_url": "http://192.168.1.1:4022"
   },

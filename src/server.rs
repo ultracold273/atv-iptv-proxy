@@ -1,35 +1,23 @@
-use crate::auth::{find_valid_token, generate_token, hash_secret, verify_secret, ClientToken};
-use crate::backend;
-use crate::cache::{now_secs, ChannelCache, EpgCache, EpgCacheKey};
-use crate::config::{load_channel_number_overrides, ProviderConfig, ProxyConfig};
-use crate::pairing::{
-    ApprovePairingRequest, CreatePairingRequest, PairingDecisionResponse, PairingError,
-    PairingStore, RejectPairingRequest,
-};
-use crate::stream::StreamProxyConfig;
-use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+mod admin;
+mod api;
+mod authz;
+mod context;
+mod ctc_session;
+mod http;
+mod policies;
+mod state;
+
+pub use state::AppState;
+
+use crate::config::ProxyConfig;
+use crate::pairing::PairingError;
+use context::RequestContext;
+use http::{json, json_error, response_status, Request};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
-
-pub struct AppState {
-    config_path: PathBuf,
-    channel_number_overrides_path: Option<PathBuf>,
-    config: Mutex<ProxyConfig>,
-    cache: Mutex<ChannelCache>,
-    epg_cache: Mutex<EpgCache>,
-    ctc_session: Mutex<Option<CachedCtcSession>>,
-    pairing: Mutex<PairingStore>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedCtcSession {
-    provider: ProviderConfig,
-    session: crate::ctc::LoginSession,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerArgs {
@@ -108,15 +96,7 @@ pub fn run(args: ServerArgs) -> Result<(), String> {
         config.backend_channels_url.is_some(),
         config.tokens.len()
     );
-    let state = Arc::new(AppState {
-        config_path,
-        channel_number_overrides_path: override_path,
-        config: Mutex::new(config),
-        cache: Mutex::new(ChannelCache::default()),
-        epg_cache: Mutex::new(EpgCache::default()),
-        ctc_session: Mutex::new(None),
-        pairing: Mutex::new(PairingStore::default()),
-    });
+    let state = Arc::new(AppState::new(config_path, override_path, config));
     serve(&listen, state)
 }
 
@@ -138,10 +118,10 @@ pub fn serve(addr: &str, state: Arc<AppState>) -> Result<(), String> {
 }
 
 fn handle_stream(mut stream: TcpStream, state: &AppState) -> std::io::Result<()> {
-    let peer = stream
-        .peer_addr()
+    let peer_addr = stream.peer_addr().ok();
+    let peer = peer_addr
         .map(|addr| addr.to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+        .unwrap_or_else(|| "unknown".to_string());
     let mut buf = vec![0u8; 64 * 1024];
     let n = stream.read(&mut buf)?;
     if n == 0 {
@@ -149,7 +129,7 @@ fn handle_stream(mut stream: TcpStream, state: &AppState) -> std::io::Result<()>
         return Ok(());
     }
     let request = String::from_utf8_lossy(&buf[..n]);
-    let response = handle_request(&request, state);
+    let response = handle_request_with_context(&request, peer_addr, state);
     eprintln!(
         "response: peer={} status={} bytes={}",
         peer,
@@ -160,6 +140,14 @@ fn handle_stream(mut stream: TcpStream, state: &AppState) -> std::io::Result<()>
 }
 
 pub fn handle_request(raw: &str, state: &AppState) -> String {
+    handle_request_with_context(raw, None, state)
+}
+
+pub fn handle_request_with_context(
+    raw: &str,
+    peer_addr: Option<SocketAddr>,
+    state: &AppState,
+) -> String {
     let started = Instant::now();
     let request = match Request::parse(raw) {
         Ok(req) => req,
@@ -168,751 +156,58 @@ pub fn handle_request(raw: &str, state: &AppState) -> String {
             return json_error(400, "bad_request", &msg);
         }
     };
-    eprintln!("request: method={} path={}", request.method, request.path);
-    let response = match (request.method.as_str(), request.path.as_str()) {
+    let ctx = RequestContext::new(request, peer_addr);
+    eprintln!(
+        "request: method={} path={}",
+        ctx.request.method, ctx.request.path
+    );
+    let response = match (ctx.request.method.as_str(), ctx.request.path.as_str()) {
         ("GET", "/health") => json(200, &serde_json::json!({"ok": true})),
-        ("GET", "/admin") => admin_page(state),
-        ("POST", "/admin/config") => admin_config(&request, state),
-        ("POST", "/admin/tokens") => admin_create_token(&request, state),
-        ("DELETE", "/admin/tokens") => admin_delete_token(&request, state),
-        ("GET", "/admin/api/v1/pairing/sessions") => admin_pairing_sessions(&request, state),
-        ("POST", "/admin/api/v1/pairing/approve") => admin_pairing_approve(&request, state),
-        ("POST", "/admin/api/v1/pairing/reject") => admin_pairing_reject(&request, state),
-        ("POST", "/api/v1/pairing/sessions") => pairing_create(&request, state),
-        ("GET", "/api/v1/channels") => channels(&request, state),
-        ("GET", "/api/v1/epg/day") => epg_day(&request, state),
-        _ if request.method == "GET" && request.path.starts_with("/api/v1/pairing/sessions/") => {
-            pairing_poll(&request, state)
+        ("GET", "/admin") => admin::page(),
+        ("GET", "/admin/api/v1/status") => admin::status(&ctx.request, state),
+        ("GET", "/admin/api/v1/config") => admin::config_get(&ctx.request, state),
+        ("GET", "/admin/api/v1/tokens") => admin::tokens_get(&ctx.request, state),
+        ("POST", "/admin/config") => admin::config_update(&ctx.request, state),
+        ("POST", "/admin/tokens") => admin::create_token(&ctx.request, state),
+        ("DELETE", "/admin/tokens") => admin::delete_token(&ctx.request, state),
+        ("GET", "/admin/api/v1/pairing/sessions") => admin::pairing_sessions(&ctx.request, state),
+        ("POST", "/admin/api/v1/pairing/approve") => admin::pairing_approve(&ctx.request, state),
+        ("POST", "/admin/api/v1/pairing/reject") => admin::pairing_reject(&ctx.request, state),
+        ("POST", "/api/v1/pairing/sessions") => api::pairing_create(&ctx, state),
+        ("GET", "/api/v1/channels") => api::channels(&ctx.request, state),
+        ("GET", "/api/v1/epg/day") => api::epg_day(&ctx.request, state),
+        _ if ctx.request.method == "GET"
+            && ctx.request.path.starts_with("/api/v1/pairing/sessions/") =>
+        {
+            api::pairing_poll(&ctx.request, state)
         }
         _ => json_error(404, "not_found", "not found"),
     };
     eprintln!(
         "request: method={} path={} status={} elapsed_ms={}",
-        request.method,
-        request.path,
+        ctx.request.method,
+        ctx.request.path,
         response_status(&response),
         started.elapsed().as_millis()
     );
     response
 }
 
-fn admin_page(state: &AppState) -> String {
-    let cfg = state.config.lock().unwrap();
-    let html = format!(
-        "<html><body><h1>ATV IPTV Proxy</h1><p>Backend: {}</p><p>udpxy: {}</p><p>Tokens: {}</p></body></html>",
-        cfg.backend_channels_url.as_deref().unwrap_or("not configured"),
-        cfg.stream.udpxy_base_url.as_deref().unwrap_or("not configured"),
-        cfg.tokens.len()
-    );
-    response(200, "text/html; charset=utf-8", html)
-}
-
-fn admin_config(request: &Request, state: &AppState) -> String {
-    if !authorized_admin(request, state) {
-        eprintln!("admin_config: unauthorized");
-        return json_error(401, "admin_unauthorized", "admin password required");
-    }
-    let form = parse_form(&request.body);
-    let mut cfg = state.config.lock().unwrap();
-    let mut updated = Vec::new();
-    if let Some(v) = form.get("backend_channels_url") {
-        cfg.backend_channels_url = if v.trim().is_empty() {
-            None
-        } else {
-            Some(v.trim().to_string())
-        };
-        updated.push("backend_channels_url");
-    }
-    if let Some(v) = form.get("udpxy_base_url") {
-        cfg.stream = StreamProxyConfig {
-            udpxy_base_url: if v.trim().is_empty() {
-                None
-            } else {
-                Some(v.trim().to_string())
-            },
-        };
-        updated.push("udpxy_base_url");
-    }
-    if let Err(e) = cfg.save_atomic(&state.config_path) {
-        eprintln!("admin_config: save_failed error={e}");
-        return json_error(500, "config_save_failed", &e.to_string());
-    }
-    eprintln!("admin_config: saved fields={}", updated.join(","));
-    json(200, &serde_json::json!({"ok": true}))
-}
-
-fn admin_create_token(request: &Request, state: &AppState) -> String {
-    if !authorized_admin(request, state) {
-        eprintln!("admin_token: unauthorized");
-        return json_error(401, "admin_unauthorized", "admin password required");
-    }
-    let form = parse_form(&request.body);
-    let name = form.get("name").map(String::as_str).unwrap_or("client");
-    let raw = match generate_token(name) {
-        Ok(token) => token,
-        Err(e) => {
-            eprintln!("admin_token: generation_failed name={name} error={e}");
-            return json_error(500, "token_generation_failed", &e.to_string());
-        }
-    };
-    let mut cfg = state.config.lock().unwrap();
-    cfg.tokens.push(ClientToken {
-        name: name.to_string(),
-        hash: hash_secret(&raw),
-        created_at: crate::auth::now_secs(),
-        last_seen_at: None,
-        enabled: true,
-    });
-    if let Err(e) = cfg.save_atomic(&state.config_path) {
-        eprintln!("admin_token: save_failed name={name} error={e}");
-        return json_error(500, "config_save_failed", &e.to_string());
-    }
-    eprintln!(
-        "admin_token: created name={name} total_tokens={}",
-        cfg.tokens.len()
-    );
-    json(200, &serde_json::json!({"token": raw}))
-}
-
-fn admin_delete_token(request: &Request, state: &AppState) -> String {
-    if !authorized_admin(request, state) {
-        eprintln!("admin_token_delete: unauthorized");
-        return json_error(401, "admin_unauthorized", "admin password required");
-    }
-    let form = parse_form(&request.body);
-    let Some(name) = request.query.get("name").or_else(|| form.get("name")) else {
-        return json_error(400, "missing_token_name", "name is required");
-    };
-    let name = name.trim();
-    if name.is_empty() {
-        return json_error(400, "missing_token_name", "name is required");
-    }
-
-    let mut cfg = state.config.lock().unwrap();
-    let before = cfg.tokens.len();
-    cfg.tokens.retain(|token| token.name != name);
-    let deleted_count = before.saturating_sub(cfg.tokens.len());
-    if deleted_count == 0 {
-        return json_error(404, "token_not_found", "token name not found");
-    }
-    if let Err(e) = cfg.save_atomic(&state.config_path) {
-        eprintln!("admin_token_delete: save_failed name={name} error={e}");
-        return json_error(500, "config_save_failed", &e.to_string());
-    }
-    eprintln!(
-        "admin_token_delete: deleted name={name} deleted_count={} remaining_tokens={}",
-        deleted_count,
-        cfg.tokens.len()
-    );
-    json(
-        200,
-        &serde_json::json!({"ok": true, "deletedCount": deleted_count}),
-    )
-}
-
-fn pairing_create(request: &Request, state: &AppState) -> String {
-    let parsed = match serde_json::from_str::<CreatePairingRequest>(&request.body) {
-        Ok(parsed) => parsed,
-        Err(e) => return json_error(400, "bad_request", &e.to_string()),
-    };
-    match state.pairing.lock().unwrap().create(parsed, now_secs()) {
-        Ok(response) => json(200, &response),
-        Err(e) => pairing_error(e),
-    }
-}
-
-fn pairing_poll(request: &Request, state: &AppState) -> String {
-    let Some(session_id) = request.path.strip_prefix("/api/v1/pairing/sessions/") else {
-        return json_error(404, "not_found", "not found");
-    };
-    let Some(client_nonce) = request.headers.get("x-client-nonce") else {
-        return json_error(401, "invalid_client_nonce", "valid client nonce required");
-    };
-    match state
-        .pairing
-        .lock()
-        .unwrap()
-        .poll(session_id, client_nonce, now_secs())
-    {
-        Ok(response) => json(200, &response),
-        Err(e) => pairing_error(e),
-    }
-}
-
-fn admin_pairing_sessions(request: &Request, state: &AppState) -> String {
-    if !authorized_admin(request, state) {
-        eprintln!("admin_pairing_sessions: unauthorized");
-        return json_error(401, "admin_unauthorized", "admin password required");
-    }
-    let status = request
-        .query
-        .get("status")
-        .map(String::as_str)
-        .unwrap_or("pending");
-    if status != "pending" {
-        return json_error(
-            400,
-            "unsupported_status",
-            "only pending pairing sessions can be listed",
-        );
-    }
-    let response = state.pairing.lock().unwrap().pending_sessions(now_secs());
-    json(200, &response)
-}
-
-fn admin_pairing_approve(request: &Request, state: &AppState) -> String {
-    if !authorized_admin(request, state) {
-        eprintln!("admin_pairing_approve: unauthorized");
-        return json_error(401, "admin_unauthorized", "admin password required");
-    }
-    let parsed = match serde_json::from_str::<ApprovePairingRequest>(&request.body) {
-        Ok(parsed) => parsed,
-        Err(e) => return json_error(400, "bad_request", &e.to_string()),
-    };
-    let candidate = match state.pairing.lock().unwrap().approval_candidate(
-        &parsed.pairing_code,
-        parsed.device_label.as_deref(),
-        now_secs(),
-    ) {
-        Ok(candidate) => candidate,
-        Err(e) => return pairing_error(e),
-    };
-    let raw = match generate_token(&candidate.token_name) {
-        Ok(token) => token,
-        Err(e) => return json_error(500, "token_generation_failed", &e.to_string()),
-    };
-    {
-        let mut cfg = state.config.lock().unwrap();
-        cfg.tokens.push(ClientToken {
-            name: candidate.token_name.clone(),
-            hash: hash_secret(&raw),
-            created_at: crate::auth::now_secs(),
-            last_seen_at: None,
-            enabled: true,
-        });
-        if let Err(e) = cfg.save_atomic(&state.config_path) {
-            return json_error(500, "config_save_failed", &e.to_string());
-        }
-    }
-    if let Err(e) = state
-        .pairing
-        .lock()
-        .unwrap()
-        .approve(&candidate.session_id, raw)
-    {
-        return pairing_error(e);
-    }
-    json(
-        200,
-        &PairingDecisionResponse {
-            status: "approved",
-            client_id: Some(candidate.session_id),
-        },
-    )
-}
-
-fn admin_pairing_reject(request: &Request, state: &AppState) -> String {
-    if !authorized_admin(request, state) {
-        eprintln!("admin_pairing_reject: unauthorized");
-        return json_error(401, "admin_unauthorized", "admin password required");
-    }
-    let parsed = match serde_json::from_str::<RejectPairingRequest>(&request.body) {
-        Ok(parsed) => parsed,
-        Err(e) => return json_error(400, "bad_request", &e.to_string()),
-    };
-    match state
-        .pairing
-        .lock()
-        .unwrap()
-        .reject(&parsed.pairing_code, now_secs())
-    {
-        Ok(()) => json(
-            200,
-            &PairingDecisionResponse {
-                status: "rejected",
-                client_id: None,
-            },
-        ),
-        Err(e) => pairing_error(e),
-    }
-}
-
 fn pairing_error(error: PairingError) -> String {
     json_error(error.status, error.code, error.message)
-}
-
-fn channels(request: &Request, state: &AppState) -> String {
-    let Some(client_name) = authorized_client_name(request, state) else {
-        eprintln!("channels: unauthorized");
-        return json_error(401, "unauthorized", "valid bearer token required");
-    };
-    let (ttl, provider, backend_url, stream_cfg) = {
-        let cfg = state.config.lock().unwrap();
-        (
-            cfg.channel_cache_ttl_seconds,
-            cfg.provider.clone(),
-            cfg.backend_channels_url.clone(),
-            cfg.stream.clone(),
-        )
-    };
-    let now = now_secs();
-    {
-        let cache = state.cache.lock().unwrap();
-        if cache.is_fresh(ttl, now) {
-            if let Some(resp) = cache.response(ttl, false) {
-                eprintln!(
-                    "channels: cache_hit client={} count={} ttl_seconds={}",
-                    client_name,
-                    resp.data.len(),
-                    ttl
-                );
-                return json(200, &resp);
-            }
-        }
-    }
-    let fetched = if let Some(provider) = provider {
-        eprintln!(
-            "channels: cache_miss client={} source=provider",
-            client_name
-        );
-        match load_channel_number_overrides(state.channel_number_overrides_path.as_deref()) {
-            Ok(overrides) => {
-                fetch_ctc_channels_with_cached_session(state, &provider, &stream_cfg, &overrides)
-            }
-            Err(e) => Err(format!("channel number overrides load failed: {e}")),
-        }
-    } else if let Some(url) = backend_url {
-        eprintln!(
-            "channels: cache_miss client={} source=backend_url",
-            client_name
-        );
-        backend::fetch_channels(&url, &stream_cfg)
-    } else {
-        eprintln!("channels: backend_not_configured client={client_name}");
-        return json_error(
-            503,
-            "backend_not_configured",
-            "provider or backend channel URL is not configured",
-        );
-    };
-
-    match fetched {
-        Ok(channels) => {
-            let channels = sort_channels_by_number(ensure_unique_channel_numbers(channels));
-            let count = channels.len();
-            let mut cache = state.cache.lock().unwrap();
-            cache.update(channels, now);
-            eprintln!(
-                "channels: refresh_ok client={} count={}",
-                client_name, count
-            );
-            json(200, &cache.response(ttl, false).unwrap())
-        }
-        Err(e) => {
-            if let Some(stale) = state.cache.lock().unwrap().response(ttl, true) {
-                eprintln!(
-                    "channels: refresh_failed_serving_stale client={} count={} error={}",
-                    client_name,
-                    stale.data.len(),
-                    e
-                );
-                json(200, &stale)
-            } else {
-                eprintln!(
-                    "channels: refresh_failed_no_cache client={} error={}",
-                    client_name, e
-                );
-                json_error(503, "backend_unavailable", &e)
-            }
-        }
-    }
-}
-
-fn cached_ctc_session(
-    state: &AppState,
-    provider: &ProviderConfig,
-) -> Result<crate::ctc::LoginSession, String> {
-    let mut cached = state.ctc_session.lock().unwrap();
-    if let Some(entry) = cached.as_ref().filter(|entry| entry.provider == *provider) {
-        eprintln!("ctc_session: cache_hit user_id={}", provider.user_id);
-        return Ok(entry.session.clone());
-    }
-
-    if cached.is_some() {
-        eprintln!(
-            "ctc_session: provider_changed user_id={} action=relogin",
-            provider.user_id
-        );
-    } else {
-        eprintln!(
-            "ctc_session: cache_miss user_id={} action=login",
-            provider.user_id
-        );
-    }
-    let session = crate::ctc::login(provider)?;
-    *cached = Some(CachedCtcSession {
-        provider: provider.clone(),
-        session: session.clone(),
-    });
-    Ok(session)
-}
-
-fn refresh_ctc_session(
-    state: &AppState,
-    provider: &ProviderConfig,
-) -> Result<crate::ctc::LoginSession, String> {
-    eprintln!(
-        "ctc_session: refresh user_id={} action=relogin",
-        provider.user_id
-    );
-    let session = crate::ctc::login(provider)?;
-    *state.ctc_session.lock().unwrap() = Some(CachedCtcSession {
-        provider: provider.clone(),
-        session: session.clone(),
-    });
-    Ok(session)
-}
-
-fn clear_ctc_session(state: &AppState, provider: &ProviderConfig) {
-    let mut cached = state.ctc_session.lock().unwrap();
-    if cached
-        .as_ref()
-        .is_some_and(|entry| entry.provider == *provider)
-    {
-        eprintln!("ctc_session: invalidate user_id={}", provider.user_id);
-        *cached = None;
-    }
-}
-
-fn fetch_ctc_channels_with_cached_session(
-    state: &AppState,
-    provider: &ProviderConfig,
-    stream_cfg: &StreamProxyConfig,
-    overrides: &crate::config::ChannelNumberOverrides,
-) -> Result<Vec<crate::cache::Channel>, String> {
-    let session = cached_ctc_session(state, provider)?;
-    match crate::ctc::fetch_channels_with_session(&session, stream_cfg, overrides) {
-        Ok(channels) => Ok(channels),
-        Err(first_error) => {
-            clear_ctc_session(state, provider);
-            eprintln!(
-                "ctc_session: retry_after_failure operation=fetch_channels user_id={} error={}",
-                provider.user_id, first_error
-            );
-            let fresh = refresh_ctc_session(state, provider)?;
-            crate::ctc::fetch_channels_with_session(&fresh, stream_cfg, overrides)
-        }
-    }
-}
-
-fn fetch_ctc_programs_with_cached_session(
-    state: &AppState,
-    provider: &ProviderConfig,
-    channel_code: &str,
-    date_offset: i32,
-) -> Result<Vec<crate::cache::Program>, String> {
-    let session = cached_ctc_session(state, provider)?;
-    match crate::ctc::fetch_programs_with_session(&session, channel_code, date_offset) {
-        Ok(programs) => Ok(programs),
-        Err(first_error) => {
-            clear_ctc_session(state, provider);
-            eprintln!(
-                "ctc_session: retry_after_failure operation=fetch_programs user_id={} channel={} date_offset={} error={}",
-                provider.user_id, channel_code, date_offset, first_error
-            );
-            let fresh = refresh_ctc_session(state, provider)?;
-            crate::ctc::fetch_programs_with_session(&fresh, channel_code, date_offset)
-        }
-    }
-}
-
-fn ensure_unique_channel_numbers(
-    mut channels: Vec<crate::cache::Channel>,
-) -> Vec<crate::cache::Channel> {
-    let mut counts = HashMap::new();
-    for channel in &channels {
-        *counts.entry(channel.number).or_insert(0) += 1;
-    }
-
-    let mut used = HashSet::new();
-    for channel in &channels {
-        if counts.get(&channel.number) == Some(&1) {
-            used.insert(channel.number);
-        }
-    }
-
-    let mut next = 1;
-    let mut duplicate_heads = HashSet::new();
-
-    for channel in &mut channels {
-        if counts.get(&channel.number) == Some(&1) {
-            continue;
-        }
-
-        if duplicate_heads.insert(channel.number) && used.insert(channel.number) {
-            continue;
-        }
-
-        let original = channel.number;
-        while used.contains(&next) {
-            next += 1;
-        }
-        channel.number = next;
-        used.insert(next);
-        eprintln!(
-            "channels: channel_number collision source=final_response number={} channel={} channel_code={} action=fallback fallback_number={}",
-            original,
-            channel.name,
-            channel.channel_code.as_deref().unwrap_or(""),
-            next
-        );
-    }
-
-    channels
-}
-
-fn sort_channels_by_number(mut channels: Vec<crate::cache::Channel>) -> Vec<crate::cache::Channel> {
-    channels.sort_by(|a, b| {
-        a.number
-            .cmp(&b.number)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.channel_code.cmp(&b.channel_code))
-    });
-    channels
-}
-
-fn epg_day(request: &Request, state: &AppState) -> String {
-    let Some(client_name) = authorized_client_name(request, state) else {
-        eprintln!("epg_day: unauthorized");
-        return json_error(401, "unauthorized", "valid bearer token required");
-    };
-    let Some(channel_code) = request.query.get("channelCode").filter(|v| !v.is_empty()) else {
-        eprintln!("epg_day: missing_channel_code client={client_name}");
-        return json_error(
-            400,
-            "missing_channel_code",
-            "channelCode query parameter is required",
-        );
-    };
-    let date_offset = match request
-        .query
-        .get("dateOffset")
-        .map(String::as_str)
-        .unwrap_or("0")
-        .parse::<i32>()
-    {
-        Ok(value @ -1..=1) => value,
-        _ => {
-            eprintln!("epg_day: invalid_date_offset client={client_name}");
-            return json_error(400, "invalid_date_offset", "dateOffset must be -1, 0, or 1");
-        }
-    };
-    let key = EpgCacheKey {
-        channel_code: channel_code.clone(),
-        date_offset,
-    };
-    let (ttl, provider) = {
-        let cfg = state.config.lock().unwrap();
-        (cfg.epg_cache_ttl_seconds, cfg.provider.clone())
-    };
-    let now = now_secs();
-    {
-        let cache = state.epg_cache.lock().unwrap();
-        if cache.is_fresh(&key, ttl, now) {
-            if let Some(resp) = cache.response(&key, ttl, false) {
-                eprintln!(
-                    "epg_day: cache_hit client={} channel={} date_offset={} count={} ttl_seconds={}",
-                    client_name,
-                    channel_code,
-                    date_offset,
-                    resp.data.len(),
-                    ttl
-                );
-                return json(200, &resp);
-            }
-        }
-    }
-    let Some(provider) = provider else {
-        eprintln!(
-            "epg_day: provider_not_configured client={} channel={} date_offset={}",
-            client_name, channel_code, date_offset
-        );
-        return json_error(503, "backend_not_configured", "provider is not configured");
-    };
-
-    eprintln!(
-        "epg_day: cache_miss client={} channel={} date_offset={} source=provider",
-        client_name, channel_code, date_offset
-    );
-    match fetch_ctc_programs_with_cached_session(state, &provider, channel_code, date_offset) {
-        Ok(programs) => {
-            let count = programs.len();
-            let mut cache = state.epg_cache.lock().unwrap();
-            cache.update(key.clone(), programs, now);
-            eprintln!(
-                "epg_day: refresh_ok client={} channel={} date_offset={} count={}",
-                client_name, channel_code, date_offset, count
-            );
-            json(200, &cache.response(&key, ttl, false).unwrap())
-        }
-        Err(e) => {
-            if let Some(stale) = state.epg_cache.lock().unwrap().response(&key, ttl, true) {
-                eprintln!(
-                    "epg_day: refresh_failed_serving_stale client={} channel={} date_offset={} count={} error={}",
-                    client_name,
-                    channel_code,
-                    date_offset,
-                    stale.data.len(),
-                    e
-                );
-                json(200, &stale)
-            } else {
-                eprintln!(
-                    "epg_day: refresh_failed_no_cache client={} channel={} date_offset={} error={}",
-                    client_name, channel_code, date_offset, e
-                );
-                json_error(503, "backend_unavailable", &e)
-            }
-        }
-    }
-}
-
-fn authorized_admin(request: &Request, state: &AppState) -> bool {
-    let Some(value) = request.headers.get("x-admin-password") else {
-        return false;
-    };
-    let cfg = state.config.lock().unwrap();
-    verify_secret(value, &cfg.admin_password_hash)
-}
-
-fn authorized_client_name(request: &Request, state: &AppState) -> Option<String> {
-    let header = request.headers.get("authorization")?;
-    let raw = header.strip_prefix("Bearer ")?;
-    let mut cfg = state.config.lock().unwrap();
-    let client_name = find_valid_token(&mut cfg.tokens, raw).map(|token| token.name.clone());
-    if client_name.is_some() {
-        let _ = cfg.save_atomic(&state.config_path);
-    }
-    client_name
-}
-
-#[derive(Debug)]
-struct Request {
-    method: String,
-    path: String,
-    query: HashMap<String, String>,
-    headers: HashMap<String, String>,
-    body: String,
-}
-
-impl Request {
-    fn parse(raw: &str) -> Result<Self, String> {
-        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
-        let mut lines = head.lines();
-        let first = lines
-            .next()
-            .ok_or_else(|| "missing request line".to_string())?;
-        let mut parts = first.split_whitespace();
-        let method = parts
-            .next()
-            .ok_or_else(|| "missing method".to_string())?
-            .to_string();
-        let target = parts.next().ok_or_else(|| "missing target".to_string())?;
-        let (path_raw, query_raw) = target.split_once('?').unwrap_or((target, ""));
-        let path = path_raw.to_string();
-        let mut headers = HashMap::new();
-        for line in lines {
-            if let Some((k, v)) = line.split_once(':') {
-                headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-            }
-        }
-        Ok(Self {
-            method,
-            path,
-            query: parse_form(query_raw),
-            headers,
-            body: body.to_string(),
-        })
-    }
-}
-
-fn parse_form(body: &str) -> HashMap<String, String> {
-    body.split('&')
-        .filter_map(|part| part.split_once('='))
-        .map(|(k, v)| (percent_decode(k), percent_decode(v)))
-        .collect()
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'+' {
-            out.push(b' ');
-            i += 1;
-        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = &value[i + 1..i + 3];
-            if let Ok(v) = u8::from_str_radix(hex, 16) {
-                out.push(v);
-                i += 3;
-            } else {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn json<T: Serialize>(status: u16, value: &T) -> String {
-    response(
-        status,
-        "application/json",
-        serde_json::to_string(value).unwrap(),
-    )
-}
-
-fn json_error(status: u16, code: &str, message: &str) -> String {
-    json(
-        status,
-        &serde_json::json!({"error": {"code": code, "message": message}}),
-    )
-}
-
-fn response(status: u16, content_type: &str, body: String) -> String {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "OK",
-    };
-    format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
-fn response_status(response: &str) -> &str {
-    response
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .unwrap_or("unknown")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::hash_secret;
+    use crate::auth::{hash_secret, ClientToken};
+    use crate::cache::{now_secs, ChannelCache, EpgCache, EpgCacheKey};
+    use crate::config::{ProviderConfig, ProxyConfig};
+    use crate::pairing::PairingStore;
+    use crate::server::state::CachedCtcSession;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -942,6 +237,15 @@ mod tests {
     fn health_is_public() {
         let state = state(ProxyConfig::default());
         assert!(handle_request("GET /health HTTP/1.1\r\n\r\n", &state).contains("200 OK"));
+    }
+
+    #[test]
+    fn admin_page_is_served() {
+        let state = state(ProxyConfig::default());
+        let resp = handle_request("GET /admin HTTP/1.1\r\n\r\n", &state);
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("text/html; charset=utf-8"));
+        assert!(resp.contains("ATV IPTV Proxy Admin"));
     }
 
     #[test]
@@ -1001,6 +305,88 @@ mod tests {
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("atv_living-room_"));
         assert_eq!(1, state.config.lock().unwrap().tokens.len());
+    }
+
+    #[test]
+    fn admin_config_response_redacts_provider_password() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            provider: Some(ProviderConfig {
+                user_id: "user".into(),
+                password: "secret-password".into(),
+                stb_id: "stb".into(),
+                local_ip: "192.0.2.10".into(),
+                local_mac: "00:11:22:33:44:55".into(),
+                auth_server_url: "http://auth.example".into(),
+            }),
+            ..ProxyConfig::default()
+        });
+
+        let resp = handle_request(
+            "GET /admin/api/v1/config HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("\"passwordConfigured\":true"));
+        assert!(!resp.contains("secret-password"));
+    }
+
+    #[test]
+    fn admin_token_list_does_not_expose_hashes() {
+        let mut cfg = ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        };
+        cfg.tokens.push(ClientToken {
+            name: "living-room".into(),
+            hash: hash_secret("raw-token"),
+            created_at: 1,
+            last_seen_at: Some(2),
+            enabled: true,
+        });
+        let state = state(cfg);
+
+        let resp = handle_request(
+            "GET /admin/api/v1/tokens HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("living-room"));
+        assert!(resp.contains("lastSeenAt"));
+        assert!(!resp.contains("sha256:"));
+        assert!(!resp.contains("raw-token"));
+    }
+
+    #[test]
+    fn admin_config_save_preserves_blank_provider_password() {
+        let state = state(ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            provider: Some(ProviderConfig {
+                user_id: "old-user".into(),
+                password: "keep-me".into(),
+                stb_id: "old-stb".into(),
+                local_ip: "192.0.2.10".into(),
+                local_mac: "00:11:22:33:44:55".into(),
+                auth_server_url: "http://old-auth.example".into(),
+            }),
+            ..ProxyConfig::default()
+        });
+
+        let resp = handle_request(
+            "POST /admin/config HTTP/1.1\r\nx-admin-password: pw\r\n\r\nprovider_user_id=new-user&provider_password=&provider_stb_id=new-stb&provider_local_ip=192.0.2.11&provider_local_mac=00:11:22:33:44:66&provider_auth_server_url=http%3A%2F%2Fnew-auth.example&channel_cache_ttl_seconds=120&epg_cache_ttl_seconds=30",
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        let cfg = state.config.lock().unwrap();
+        let provider = cfg.provider.as_ref().unwrap();
+        assert_eq!("new-user", provider.user_id);
+        assert_eq!("keep-me", provider.password);
+        assert_eq!("new-stb", provider.stb_id);
+        assert_eq!(120, cfg.channel_cache_ttl_seconds);
+        assert_eq!(30, cfg.epg_cache_ttl_seconds);
     }
 
     #[test]
@@ -1150,6 +536,19 @@ mod tests {
     }
 
     #[test]
+    fn pairing_create_accepts_context_peer_metadata() {
+        let state = state(ProxyConfig::default());
+        let resp = handle_request_with_context(
+            "POST /api/v1/pairing/sessions HTTP/1.1\r\ncontent-type: application/json\r\n\r\n{\"clientNonce\":\"nonce\"}",
+            Some("192.0.2.55:12345".parse().unwrap()),
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("pairingCode"));
+    }
+
+    #[test]
     fn fresh_cache_is_served() {
         let mut cfg = ProxyConfig::default();
         let raw = "token";
@@ -1180,7 +579,7 @@ mod tests {
 
     #[test]
     fn final_channel_numbers_are_unique() {
-        let channels = ensure_unique_channel_numbers(vec![
+        let channels = api::ensure_unique_channel_numbers(vec![
             crate::cache::Channel {
                 number: 1,
                 name: "A".into(),
@@ -1209,7 +608,7 @@ mod tests {
 
     #[test]
     fn channels_sort_by_number_before_caching() {
-        let channels = sort_channels_by_number(vec![
+        let channels = api::sort_channels_by_number(vec![
             crate::cache::Channel {
                 number: 3,
                 name: "C".into(),
@@ -1321,7 +720,7 @@ mod tests {
             },
         });
 
-        let session = cached_ctc_session(&state, &provider).unwrap();
+        let session = ctc_session::cached_ctc_session(&state, &provider).unwrap();
 
         assert_eq!("J1", session.jsession_id);
     }
@@ -1351,7 +750,7 @@ mod tests {
             },
         });
 
-        clear_ctc_session(&state, &provider);
+        ctc_session::clear_ctc_session(&state, &provider);
 
         assert_eq!(
             "J2",
