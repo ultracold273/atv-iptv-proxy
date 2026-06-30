@@ -1,6 +1,6 @@
 [package]
 name = "atv-iptv-proxy"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "LAN-only IPTV authentication and channel proxy for the ATV client"
 license = "MIT"
