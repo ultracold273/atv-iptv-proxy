@@ -245,7 +245,7 @@
         button.type = "button";
         button.className = "danger";
         button.textContent = "Delete";
-        button.addEventListener("click", () => deleteToken(token.name));
+        button.addEventListener("click", () => deleteToken(token.id));
         action.appendChild(button);
         row.appendChild(action);
         body.appendChild(row);
@@ -332,9 +332,9 @@
       }
     }
 
-    async function deleteToken(name) {
+    async function deleteToken(id) {
       try {
-        await api("/admin/tokens?name=" + encodeURIComponent(name), { method: "DELETE" });
+        await api("/admin/tokens?id=" + encodeURIComponent(id), { method: "DELETE" });
         await loadTokens();
         await loadStatus();
       } catch (error) {
