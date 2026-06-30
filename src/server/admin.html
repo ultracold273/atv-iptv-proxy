@@ -24,7 +24,11 @@
     th { color: #52616b; font-weight: 650; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
-    .login { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; gap: 10px; align-items: end; }
+    [hidden] { display: none !important; }
+    .login-page { max-width: 420px; margin: 28px auto 0; }
+    .login { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 10px; align-items: end; }
+    .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .section-title h2 { margin: 0; }
     .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
     .metric { padding: 12px; background: #f3f5f7; border: 1px solid #e0e5ea; border-radius: 8px; }
     .metric span { display: block; color: #52616b; font-size: 12px; }
@@ -46,71 +50,99 @@
 <body>
   <header><h1>ATV IPTV Proxy Admin</h1></header>
   <main>
-    <section>
-      <h2>Access</h2>
-      <div class="login">
+    <section id="loginPage" class="login-page">
+      <h2>Sign In</h2>
+      <form id="loginForm" class="login">
         <label>Admin password
-          <input id="adminPassword" type="password" autocomplete="current-password">
+          <input id="adminPassword" type="password" autocomplete="current-password" required autofocus>
         </label>
-        <label class="muted"><input id="rememberPassword" type="checkbox"> Keep until this tab closes</label>
-        <button id="connectButton" type="button">Connect</button>
-      </div>
-      <p id="accessMessage" class="message"></p>
-    </section>
-
-    <section>
-      <h2>Status</h2>
-      <div id="statusGrid" class="status-grid"></div>
-    </section>
-
-    <section>
-      <h2>Settings</h2>
-      <form id="settingsForm">
-        <div class="grid">
-          <label>Backend channels URL <input name="backend_channels_url"></label>
-          <label>udpxy base URL <input name="udpxy_base_url"></label>
-          <label>Channel cache TTL seconds <input name="channel_cache_ttl_seconds" type="number" min="1"></label>
-          <label>EPG cache TTL seconds <input name="epg_cache_ttl_seconds" type="number" min="1"></label>
-          <label>Provider user ID <input name="provider_user_id"></label>
-          <label>Provider password <input name="provider_password" type="password" placeholder="Leave blank to keep existing"></label>
-          <label>Provider STB ID <input name="provider_stb_id"></label>
-          <label>Provider local IP <input name="provider_local_ip"></label>
-          <label>Provider local MAC <input name="provider_local_mac"></label>
-          <label>Provider auth server URL <input name="provider_auth_server_url"></label>
-        </div>
-        <div class="actions" style="margin-top:12px">
-          <button type="submit">Save Settings</button>
-          <button id="reloadButton" class="secondary" type="button">Reload</button>
-        </div>
+        <button id="loginButton" type="submit">Sign In</button>
       </form>
-      <p id="settingsMessage" class="message"></p>
+      <p id="loginMessage" class="message"></p>
     </section>
 
-    <section>
-      <h2>Tokens</h2>
-      <form id="tokenForm" class="actions">
-        <label>Client name <input name="name" required></label>
-        <button type="submit">Create Token</button>
-      </form>
-      <div id="tokenResult" class="token-result"><strong>New token</strong><span></span></div>
-      <table>
-        <thead><tr><th>Name</th><th>Enabled</th><th>Created</th><th>Last seen</th><th></th></tr></thead>
-        <tbody id="tokensBody"></tbody>
-      </table>
-    </section>
+    <div id="adminPage" hidden>
+      <section>
+        <div class="section-title">
+          <h2>Status</h2>
+          <button id="logoutButton" class="secondary" type="button">Sign Out</button>
+        </div>
+        <div id="statusGrid" class="status-grid"></div>
+        <p id="statusMessage" class="message"></p>
+      </section>
 
-    <section>
-      <h2>Pairing Requests</h2>
-      <table>
-        <thead><tr><th>Code</th><th>Device</th><th>App</th><th>Expires</th><th>Label</th><th></th></tr></thead>
-        <tbody id="pairingBody"></tbody>
-      </table>
-      <p id="pairingMessage" class="message"></p>
-    </section>
+      <section>
+        <h2>Settings</h2>
+        <form id="settingsForm">
+          <div class="grid">
+            <label>Backend channels URL <input name="backend_channels_url"></label>
+            <label>udpxy base URL <input name="udpxy_base_url"></label>
+            <label>Channel cache TTL seconds <input name="channel_cache_ttl_seconds" type="number" min="1"></label>
+            <label>EPG cache TTL seconds <input name="epg_cache_ttl_seconds" type="number" min="1"></label>
+            <label>Provider user ID <input name="provider_user_id"></label>
+            <label>Provider password <input name="provider_password" type="password" placeholder="Leave blank to keep existing"></label>
+            <label>Provider STB ID <input name="provider_stb_id"></label>
+            <label>Provider local IP <input name="provider_local_ip"></label>
+            <label>Provider local MAC <input name="provider_local_mac"></label>
+            <label>Provider auth server URL <input name="provider_auth_server_url"></label>
+          </div>
+          <div class="actions" style="margin-top:12px">
+            <button type="submit">Save Settings</button>
+            <button id="reloadButton" class="secondary" type="button">Reload</button>
+          </div>
+        </form>
+        <p id="settingsMessage" class="message"></p>
+      </section>
+
+      <section>
+        <h2>Tokens</h2>
+        <form id="tokenForm" class="actions">
+          <label>Client name <input name="name" required></label>
+          <button type="submit">Create Token</button>
+        </form>
+        <div id="tokenResult" class="token-result"><strong>New token</strong><span></span></div>
+        <table>
+          <thead><tr><th>Name</th><th>Enabled</th><th>Created</th><th>Last seen</th><th></th></tr></thead>
+          <tbody id="tokensBody"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Pairing Requests</h2>
+        <table>
+          <thead><tr><th>Code</th><th>Device</th><th>App</th><th>Expires</th><th>Label</th><th></th></tr></thead>
+          <tbody id="pairingBody"></tbody>
+        </table>
+        <p id="pairingMessage" class="message"></p>
+      </section>
+    </div>
   </main>
   <script>
-    const state = { password: sessionStorage.getItem("adminPassword") || "" };
+    const PASSWORD_KEY = "adminPassword";
+    const state = { password: sessionStorage.getItem(PASSWORD_KEY) || "", authenticated: false };
     const $ = (id) => document.getElementById(id);
+
+    function showLogin(message, isError) {
+      state.authenticated = false;
+      $("adminPage").hidden = true;
+      $("loginPage").hidden = false;
+      setMessage("loginMessage", message || "", isError);
+      $("adminPassword").focus();
+    }
+
+    function showAdmin() {
+      state.authenticated = true;
+      $("loginPage").hidden = true;
+      $("adminPage").hidden = false;
+      setMessage("loginMessage", "", false);
+    }
+
+    function clearPassword(message, isError) {
+      state.password = "";
+      sessionStorage.removeItem(PASSWORD_KEY);
+      $("adminPassword").value = "";
+      showLogin(message || "", Boolean(isError));
+    }
 
     function setMessage(id, text, isError) {
       const node = $(id);
@@ -134,10 +166,22 @@
         body = {};
       }
       if (!response.ok) {
-        const message = body.error && body.error.message ? body.error.message : response.statusText;
-        throw new Error(message);
+        const message = response.status === 401
+          ? "The password is not correct."
+          : body.error && body.error.message ? body.error.message : response.statusText;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
       }
       return body;
+    }
+
+    function handleApiError(error, messageId) {
+      if (error.status === 401) {
+        clearPassword("The password is not correct.", true);
+        return;
+      }
+      setMessage(messageId || "statusMessage", error.message, true);
     }
 
     function addMetric(parent, label, value) {
@@ -252,7 +296,7 @@
     async function refreshAll() {
       if (!state.password) return;
       await Promise.all([loadStatus(), loadConfig(), loadTokens(), loadPairing()]);
-      setMessage("accessMessage", "Connected", false);
+      setMessage("statusMessage", "Updated", false);
     }
 
     async function saveSettings(event) {
@@ -263,7 +307,7 @@
         setMessage("settingsMessage", "Settings saved", false);
         await refreshAll();
       } catch (error) {
-        setMessage("settingsMessage", error.message, true);
+        handleApiError(error, "settingsMessage");
       }
     }
 
@@ -279,8 +323,12 @@
         await loadTokens();
         await loadStatus();
       } catch (error) {
-        result.style.display = "block";
-        result.querySelector("span").textContent = error.message;
+        if (error.status === 401) {
+          handleApiError(error);
+        } else {
+          result.style.display = "block";
+          result.querySelector("span").textContent = error.message;
+        }
       }
     }
 
@@ -290,7 +338,7 @@
         await loadTokens();
         await loadStatus();
       } catch (error) {
-        setMessage("accessMessage", error.message, true);
+        handleApiError(error);
       }
     }
 
@@ -304,33 +352,52 @@
         await loadTokens();
         await loadStatus();
       } catch (error) {
-        setMessage("pairingMessage", error.message, true);
+        handleApiError(error, "pairingMessage");
       }
     }
 
-    $("connectButton").addEventListener("click", async () => {
-      state.password = $("adminPassword").value;
-      if ($("rememberPassword").checked) {
-        sessionStorage.setItem("adminPassword", state.password);
-      } else {
-        sessionStorage.removeItem("adminPassword");
-      }
+    async function signIn(password) {
+      state.password = password;
       try {
-        await refreshAll();
+        await loadStatus();
+        sessionStorage.setItem(PASSWORD_KEY, state.password);
+        showAdmin();
+        setMessage("statusMessage", "Connected", false);
+        try {
+          await Promise.all([loadConfig(), loadTokens(), loadPairing()]);
+        } catch (error) {
+          handleApiError(error);
+        }
       } catch (error) {
-        setMessage("accessMessage", error.message, true);
+        if (error.status === 401) {
+          clearPassword("The password is not correct.", true);
+        } else {
+          showLogin(error.message, true);
+        }
       }
+    }
+
+    $("loginForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const password = $("adminPassword").value;
+      if (!password) {
+        showLogin("Enter the admin password.", true);
+        return;
+      }
+      $("loginButton").disabled = true;
+      await signIn(password);
+      $("loginButton").disabled = false;
     });
+    $("logoutButton").addEventListener("click", () => clearPassword("Signed out.", false));
     $("settingsForm").addEventListener("submit", saveSettings);
     $("tokenForm").addEventListener("submit", createToken);
-    $("reloadButton").addEventListener("click", () => refreshAll().catch((error) => setMessage("accessMessage", error.message, true)));
+    $("reloadButton").addEventListener("click", () => refreshAll().catch((error) => handleApiError(error)));
     if (state.password) {
       $("adminPassword").value = state.password;
-      $("rememberPassword").checked = true;
-      refreshAll().catch((error) => setMessage("accessMessage", error.message, true));
+      signIn(state.password);
     }
     setInterval(() => {
-      if (state.password) loadPairing().catch(() => {});
+      if (state.authenticated) loadPairing().catch(() => {});
     }, 5000);
   </script>
 </body>

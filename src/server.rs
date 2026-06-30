@@ -246,6 +246,9 @@ mod tests {
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("text/html; charset=utf-8"));
         assert!(resp.contains("ATV IPTV Proxy Admin"));
+        assert!(resp.contains("id=\"loginPage\""));
+        assert!(resp.contains("id=\"adminPage\" hidden"));
+        assert!(resp.contains("sessionStorage.setItem(PASSWORD_KEY"));
     }
 
     #[test]
