@@ -20,6 +20,8 @@ pub struct ProxyConfig {
     pub backend_channels_url: Option<String>,
     pub provider: Option<ProviderConfig>,
     #[serde(default)]
+    pub pairing: PairingConfig,
+    #[serde(default)]
     pub stream: StreamProxyConfig,
     #[serde(default)]
     pub tokens: Vec<ClientToken>,
@@ -33,6 +35,26 @@ pub struct ProviderConfig {
     pub local_ip: String,
     pub local_mac: String,
     pub auth_server_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingConfig {
+    #[serde(default = "default_pairing_session_ttl_seconds")]
+    pub session_ttl_seconds: u64,
+    #[serde(default = "default_pairing_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    #[serde(default)]
+    pub create_rate_limit: RateLimitConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_pairing_rate_limit_window_seconds")]
+    pub window_seconds: u64,
+    #[serde(default = "default_pairing_rate_limit_max_requests")]
+    pub max_requests: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +83,7 @@ impl Default for ProxyConfig {
             epg_cache_ttl_seconds: default_epg_cache_ttl_seconds(),
             backend_channels_url: None,
             provider: None,
+            pairing: PairingConfig::default(),
             stream: StreamProxyConfig::default(),
             tokens: Vec::new(),
         }
@@ -73,6 +96,42 @@ fn default_channel_cache_ttl_seconds() -> u64 {
 
 fn default_epg_cache_ttl_seconds() -> u64 {
     300
+}
+
+fn default_pairing_session_ttl_seconds() -> u64 {
+    300
+}
+
+fn default_pairing_poll_interval_seconds() -> u64 {
+    2
+}
+
+fn default_pairing_rate_limit_window_seconds() -> u64 {
+    60
+}
+
+fn default_pairing_rate_limit_max_requests() -> u32 {
+    10
+}
+
+impl Default for PairingConfig {
+    fn default() -> Self {
+        Self {
+            session_ttl_seconds: default_pairing_session_ttl_seconds(),
+            poll_interval_seconds: default_pairing_poll_interval_seconds(),
+            create_rate_limit: RateLimitConfig::default(),
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_seconds: default_pairing_rate_limit_window_seconds(),
+            max_requests: default_pairing_rate_limit_max_requests(),
+        }
+    }
 }
 
 impl ProxyConfig {
@@ -189,5 +248,24 @@ mod tests {
             ..ProxyConfig::default()
         };
         assert!(config.validate_startup().is_ok());
+    }
+
+    #[test]
+    fn pairing_config_defaults_keep_rate_limit_disabled() {
+        let config: ProxyConfig = serde_json::from_str(
+            r#"{
+              "listen": "127.0.0.1:8088",
+              "admin_password_hash": "sha256:8a012f93fc727f163d806c746dd1180e3d1fa0f1c7bfaef86a0372d1dd332d39",
+              "backend_channels_url": null,
+              "provider": null
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(300, config.pairing.session_ttl_seconds);
+        assert_eq!(2, config.pairing.poll_interval_seconds);
+        assert!(!config.pairing.create_rate_limit.enabled);
+        assert_eq!(60, config.pairing.create_rate_limit.window_seconds);
+        assert_eq!(10, config.pairing.create_rate_limit.max_requests);
     }
 }

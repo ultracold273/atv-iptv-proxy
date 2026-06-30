@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ATV IPTV Proxy Admin</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #1f2933; background: #f7f8fa; }
+    header { background: #12343b; color: white; padding: 18px 24px; }
+    header h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: 0; }
+    main { max-width: 1120px; margin: 0 auto; padding: 20px; }
+    section { margin: 0 0 18px; padding: 18px; background: white; border: 1px solid #d9dee3; border-radius: 8px; }
+    h2 { margin: 0 0 14px; font-size: 16px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #52616b; }
+    input { width: 100%; min-height: 36px; border: 1px solid #c9d1d9; border-radius: 6px; padding: 8px 10px; font: inherit; color: #1f2933; background: white; }
+    button { min-height: 36px; border: 1px solid #0f766e; border-radius: 6px; padding: 8px 12px; font: inherit; font-weight: 650; color: white; background: #0f766e; cursor: pointer; }
+    button.secondary { color: #1f2933; background: #eef2f5; border-color: #c9d1d9; }
+    button.danger { background: #b42318; border-color: #b42318; }
+    button:disabled { opacity: .55; cursor: default; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px 8px; border-bottom: 1px solid #e6eaee; text-align: left; vertical-align: middle; }
+    th { color: #52616b; font-weight: 650; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+    .login { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; gap: 10px; align-items: end; }
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .metric { padding: 12px; background: #f3f5f7; border: 1px solid #e0e5ea; border-radius: 8px; }
+    .metric span { display: block; color: #52616b; font-size: 12px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 16px; overflow-wrap: anywhere; }
+    .muted { color: #697782; font-size: 13px; }
+    .message { min-height: 22px; color: #0f766e; font-size: 13px; }
+    .error { color: #b42318; }
+    .token-result { display: none; margin-top: 10px; padding: 12px; background: #f6f2df; border: 1px solid #d8c983; border-radius: 8px; overflow-wrap: anywhere; }
+    .token-result strong { display: block; margin-bottom: 6px; }
+    @media (max-width: 700px) {
+      main { padding: 12px; }
+      .login { grid-template-columns: 1fr; }
+      .actions { align-items: stretch; }
+      button { width: 100%; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header><h1>ATV IPTV Proxy Admin</h1></header>
+  <main>
+    <section>
+      <h2>Access</h2>
+      <div class="login">
+        <label>Admin password
+          <input id="adminPassword" type="password" autocomplete="current-password">
+        </label>
+        <label class="muted"><input id="rememberPassword" type="checkbox"> Keep until this tab closes</label>
+        <button id="connectButton" type="button">Connect</button>
+      </div>
+      <p id="accessMessage" class="message"></p>
+    </section>
+
+    <section>
+      <h2>Status</h2>
+      <div id="statusGrid" class="status-grid"></div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <form id="settingsForm">
+        <div class="grid">
+          <label>Backend channels URL <input name="backend_channels_url"></label>
+          <label>udpxy base URL <input name="udpxy_base_url"></label>
+          <label>Channel cache TTL seconds <input name="channel_cache_ttl_seconds" type="number" min="1"></label>
+          <label>EPG cache TTL seconds <input name="epg_cache_ttl_seconds" type="number" min="1"></label>
+          <label>Provider user ID <input name="provider_user_id"></label>
+          <label>Provider password <input name="provider_password" type="password" placeholder="Leave blank to keep existing"></label>
+          <label>Provider STB ID <input name="provider_stb_id"></label>
+          <label>Provider local IP <input name="provider_local_ip"></label>
+          <label>Provider local MAC <input name="provider_local_mac"></label>
+          <label>Provider auth server URL <input name="provider_auth_server_url"></label>
+        </div>
+        <div class="actions" style="margin-top:12px">
+          <button type="submit">Save Settings</button>
+          <button id="reloadButton" class="secondary" type="button">Reload</button>
+        </div>
+      </form>
+      <p id="settingsMessage" class="message"></p>
+    </section>
+
+    <section>
+      <h2>Tokens</h2>
+      <form id="tokenForm" class="actions">
+        <label>Client name <input name="name" required></label>
+        <button type="submit">Create Token</button>
+      </form>
+      <div id="tokenResult" class="token-result"><strong>New token</strong><span></span></div>
+      <table>
+        <thead><tr><th>Name</th><th>Enabled</th><th>Created</th><th>Last seen</th><th></th></tr></thead>
+        <tbody id="tokensBody"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Pairing Requests</h2>
+      <table>
+        <thead><tr><th>Code</th><th>Device</th><th>App</th><th>Expires</th><th>Label</th><th></th></tr></thead>
+        <tbody id="pairingBody"></tbody>
+      </table>
+      <p id="pairingMessage" class="message"></p>
+    </section>
+  </main>
+  <script>
+    const state = { password: sessionStorage.getItem("adminPassword") || "" };
+    const $ = (id) => document.getElementById(id);
+
+    function setMessage(id, text, isError) {
+      const node = $(id);
+      node.textContent = text || "";
+      node.classList.toggle("error", Boolean(isError));
+    }
+
+    function authHeaders(extra) {
+      return Object.assign({ "x-admin-password": state.password }, extra || {});
+    }
+
+    async function api(path, options) {
+      const response = await fetch(path, Object.assign({}, options, {
+        headers: authHeaders(options && options.headers)
+      }));
+      const text = await response.text();
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch (_) {
+        body = {};
+      }
+      if (!response.ok) {
+        const message = body.error && body.error.message ? body.error.message : response.statusText;
+        throw new Error(message);
+      }
+      return body;
+    }
+
+    function addMetric(parent, label, value) {
+      const box = document.createElement("div");
+      box.className = "metric";
+      const small = document.createElement("span");
+      small.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value == null || value === "" ? "-" : String(value);
+      box.append(small, strong);
+      parent.appendChild(box);
+    }
+
+    function formatTime(value) {
+      if (!value) return "-";
+      return new Date(value * 1000).toLocaleString();
+    }
+
+    async function loadStatus() {
+      const status = await api("/admin/api/v1/status");
+      const grid = $("statusGrid");
+      grid.replaceChildren();
+      addMetric(grid, "Listen", status.listen);
+      addMetric(grid, "Backend", status.backendMode);
+      addMetric(grid, "Provider", status.providerConfigured ? "configured" : "not configured");
+      addMetric(grid, "udpxy", status.udpxyConfigured ? "configured" : "not configured");
+      addMetric(grid, "Tokens", status.tokenCount);
+      addMetric(grid, "Pending pairing", status.pendingPairingCount);
+      addMetric(grid, "Channel cache", status.channelCache ? status.channelCache.channelCount + " channels" : "empty");
+    }
+
+    async function loadConfig() {
+      const config = await api("/admin/api/v1/config");
+      const form = $("settingsForm");
+      form.backend_channels_url.value = config.backendChannelsUrl || "";
+      form.udpxy_base_url.value = config.stream && config.stream.udpxy_base_url ? config.stream.udpxy_base_url : "";
+      form.channel_cache_ttl_seconds.value = config.channelCacheTtlSeconds;
+      form.epg_cache_ttl_seconds.value = config.epgCacheTtlSeconds;
+      const provider = config.provider || {};
+      form.provider_user_id.value = provider.userId || "";
+      form.provider_password.value = "";
+      form.provider_password.placeholder = provider.passwordConfigured ? "Configured; leave blank to keep" : "Not configured";
+      form.provider_stb_id.value = provider.stbId || "";
+      form.provider_local_ip.value = provider.localIp || "";
+      form.provider_local_mac.value = provider.localMac || "";
+      form.provider_auth_server_url.value = provider.authServerUrl || "";
+    }
+
+    function renderTokens(tokens) {
+      const body = $("tokensBody");
+      body.replaceChildren();
+      tokens.forEach((token) => {
+        const row = document.createElement("tr");
+        [token.name, token.enabled ? "yes" : "no", formatTime(token.createdAt), formatTime(token.lastSeenAt)].forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+        const action = document.createElement("td");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "danger";
+        button.textContent = "Delete";
+        button.addEventListener("click", () => deleteToken(token.name));
+        action.appendChild(button);
+        row.appendChild(action);
+        body.appendChild(row);
+      });
+    }
+
+    async function loadTokens() {
+      const tokens = await api("/admin/api/v1/tokens");
+      renderTokens(tokens.data || []);
+    }
+
+    function renderPairing(sessions) {
+      const body = $("pairingBody");
+      body.replaceChildren();
+      sessions.forEach((session) => {
+        const row = document.createElement("tr");
+        [session.pairingCode, session.deviceName + " / " + session.deviceType, session.appId + " " + session.appVersion, formatTime(session.expiresAt)].forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+        const labelCell = document.createElement("td");
+        const label = document.createElement("input");
+        label.value = session.deviceName || "";
+        labelCell.appendChild(label);
+        row.appendChild(labelCell);
+        const action = document.createElement("td");
+        const approve = document.createElement("button");
+        approve.type = "button";
+        approve.textContent = "Approve";
+        approve.addEventListener("click", () => decidePairing("approve", session.pairingCode, label.value));
+        const reject = document.createElement("button");
+        reject.type = "button";
+        reject.className = "secondary";
+        reject.textContent = "Reject";
+        reject.addEventListener("click", () => decidePairing("reject", session.pairingCode, ""));
+        action.append(approve, document.createTextNode(" "), reject);
+        row.appendChild(action);
+        body.appendChild(row);
+      });
+    }
+
+    async function loadPairing() {
+      const response = await api("/admin/api/v1/pairing/sessions?status=pending");
+      renderPairing(response.data || []);
+    }
+
+    async function refreshAll() {
+      if (!state.password) return;
+      await Promise.all([loadStatus(), loadConfig(), loadTokens(), loadPairing()]);
+      setMessage("accessMessage", "Connected", false);
+    }
+
+    async function saveSettings(event) {
+      event.preventDefault();
+      const body = new URLSearchParams(new FormData(event.currentTarget));
+      try {
+        await api("/admin/config", { method: "POST", body });
+        setMessage("settingsMessage", "Settings saved", false);
+        await refreshAll();
+      } catch (error) {
+        setMessage("settingsMessage", error.message, true);
+      }
+    }
+
+    async function createToken(event) {
+      event.preventDefault();
+      const result = $("tokenResult");
+      try {
+        const body = new URLSearchParams(new FormData(event.currentTarget));
+        const response = await api("/admin/tokens", { method: "POST", body });
+        result.style.display = "block";
+        result.querySelector("span").textContent = response.token;
+        event.currentTarget.reset();
+        await loadTokens();
+        await loadStatus();
+      } catch (error) {
+        result.style.display = "block";
+        result.querySelector("span").textContent = error.message;
+      }
+    }
+
+    async function deleteToken(name) {
+      try {
+        await api("/admin/tokens?name=" + encodeURIComponent(name), { method: "DELETE" });
+        await loadTokens();
+        await loadStatus();
+      } catch (error) {
+        setMessage("accessMessage", error.message, true);
+      }
+    }
+
+    async function decidePairing(action, pairingCode, deviceLabel) {
+      const path = action === "approve" ? "/admin/api/v1/pairing/approve" : "/admin/api/v1/pairing/reject";
+      const body = action === "approve" ? { pairingCode, deviceLabel } : { pairingCode };
+      try {
+        await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        setMessage("pairingMessage", action === "approve" ? "Pairing approved" : "Pairing rejected", false);
+        await loadPairing();
+        await loadTokens();
+        await loadStatus();
+      } catch (error) {
+        setMessage("pairingMessage", error.message, true);
+      }
+    }
+
+    $("connectButton").addEventListener("click", async () => {
+      state.password = $("adminPassword").value;
+      if ($("rememberPassword").checked) {
+        sessionStorage.setItem("adminPassword", state.password);
+      } else {
+        sessionStorage.removeItem("adminPassword");
+      }
+      try {
+        await refreshAll();
+      } catch (error) {
+        setMessage("accessMessage", error.message, true);
+      }
+    });
+    $("settingsForm").addEventListener("submit", saveSettings);
+    $("tokenForm").addEventListener("submit", createToken);
+    $("reloadButton").addEventListener("click", () => refreshAll().catch((error) => setMessage("accessMessage", error.message, true)));
+    if (state.password) {
+      $("adminPassword").value = state.password;
+      $("rememberPassword").checked = true;
+      refreshAll().catch((error) => setMessage("accessMessage", error.message, true));
+    }
+    setInterval(() => {
+      if (state.password) loadPairing().catch(() => {});
+    }, 5000);
+  </script>
+</body>
+</html>
