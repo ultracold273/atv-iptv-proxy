@@ -3,7 +3,7 @@ use super::http::{json, json_error, parse_form, response, Request};
 use super::pairing_error;
 use super::state::AppState;
 use crate::auth::{
-    generate_token, generate_token_id, hash_secret, normalize_token_ids, ClientToken,
+    generate_token, hash_secret, normalize_token_ids, token_id_from_hash, ClientToken,
 };
 use crate::cache::now_secs;
 use crate::config::{ProviderConfig, ProxyConfig};
@@ -297,10 +297,7 @@ pub(super) fn create_token(request: &Request, state: &AppState) -> String {
         }
     };
     let mut cfg = state.config.lock().unwrap();
-    if let Err(e) = push_client_token(&mut cfg, name, &raw) {
-        eprintln!("admin_token: id_generation_failed name={name} error={e}");
-        return json_error(500, "token_id_generation_failed", &e.to_string());
-    }
+    push_client_token(&mut cfg, name, &raw);
     if let Err(e) = cfg.save_atomic(&state.config_path) {
         eprintln!("admin_token: save_failed name={name} error={e}");
         return json_error(500, "config_save_failed", &e.to_string());
@@ -393,9 +390,7 @@ pub(super) fn pairing_approve(request: &Request, state: &AppState) -> String {
     };
     {
         let mut cfg = state.config.lock().unwrap();
-        if let Err(e) = push_client_token(&mut cfg, &candidate.token_name, &raw) {
-            return json_error(500, "token_id_generation_failed", &e.to_string());
-        }
+        push_client_token(&mut cfg, &candidate.token_name, &raw);
         if let Err(e) = cfg.save_atomic(&state.config_path) {
             return json_error(500, "config_save_failed", &e.to_string());
         }
@@ -443,26 +438,32 @@ pub(super) fn pairing_reject(request: &Request, state: &AppState) -> String {
     }
 }
 
-fn push_client_token(cfg: &mut ProxyConfig, name: &str, raw: &str) -> std::io::Result<()> {
+fn push_client_token(cfg: &mut ProxyConfig, name: &str, raw: &str) {
     normalize_token_ids(&mut cfg.tokens);
-    let id = unique_token_id(&cfg.tokens)?;
+    let hash = hash_secret(raw);
+    let id = unique_token_id(&cfg.tokens, &hash);
     cfg.tokens.push(ClientToken {
         id,
         name: name.to_string(),
-        hash: hash_secret(raw),
+        hash,
         created_at: crate::auth::now_secs(),
         last_seen_at: None,
         enabled: true,
     });
-    Ok(())
 }
 
-fn unique_token_id(tokens: &[ClientToken]) -> std::io::Result<String> {
+fn unique_token_id(tokens: &[ClientToken], hash: &str) -> String {
+    let id = token_id_from_hash(hash);
+    if tokens.iter().all(|token| token.id != id) {
+        return id;
+    }
+    let mut suffix = 2;
     loop {
-        let id = generate_token_id()?;
-        if tokens.iter().all(|token| token.id != id) {
-            return Ok(id);
+        let candidate = format!("{id}_{suffix}");
+        if tokens.iter().all(|token| token.id != candidate) {
+            return candidate;
         }
+        suffix += 1;
     }
 }
 

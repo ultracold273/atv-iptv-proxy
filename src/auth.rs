@@ -44,17 +44,11 @@ pub fn generate_token(name: &str) -> std::io::Result<String> {
     Ok(format!("atv_{}_{}", sanitize_name(name), to_hex(&bytes)))
 }
 
-pub fn generate_token_id() -> std::io::Result<String> {
-    let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(format!("tok_{}", to_hex(&bytes)))
-}
-
 pub fn normalize_token_ids(tokens: &mut [ClientToken]) {
     let mut used = HashSet::new();
     for token in tokens.iter_mut() {
         if token.id.trim().is_empty() {
-            token.id = legacy_token_id(&token.hash);
+            token.id = token_id_from_hash(&token.hash);
         }
         if used.insert(token.id.clone()) {
             continue;
@@ -72,11 +66,11 @@ pub fn normalize_token_ids(tokens: &mut [ClientToken]) {
     }
 }
 
-fn legacy_token_id(hash: &str) -> String {
+pub fn token_id_from_hash(hash: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(hash.as_bytes());
     let hex = to_hex(&hasher.finalize());
-    format!("legacy_{}", &hex[..16])
+    format!("tok_{}", &hex[..16])
 }
 
 pub fn now_secs() -> u64 {
@@ -164,8 +158,8 @@ mod tests {
 
         normalize_token_ids(&mut tokens);
 
-        assert!(tokens[0].id.starts_with("legacy_"));
-        assert!(tokens[1].id.starts_with("legacy_"));
+        assert!(tokens[0].id.starts_with("tok_"));
+        assert!(tokens[1].id.starts_with("tok_"));
         assert_ne!(tokens[0].id, tokens[1].id);
     }
 }

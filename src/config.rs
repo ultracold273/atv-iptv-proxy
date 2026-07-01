@@ -302,6 +302,6 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         assert_eq!(1, config.tokens.len());
-        assert!(config.tokens[0].id.starts_with("legacy_"));
+        assert!(config.tokens[0].id.starts_with("tok_"));
     }
 }
