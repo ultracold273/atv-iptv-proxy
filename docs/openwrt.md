@@ -200,14 +200,21 @@ The raw token is returned only in this response:
 {"token":"atv_living-room-tv_..."}
 ```
 
-Delete all tokens with a matching client name:
+List tokens to find the stable admin ID for the token you want to delete:
 
 ```sh
-curl -fsS -X DELETE "$PROXY_URL/admin/tokens?name=living-room-tv" \
+curl -fsS "$PROXY_URL/admin/api/v1/tokens" \
   -H "x-admin-password: $ADMIN_PASSWORD"
 ```
 
-The response reports how many matching tokens were removed:
+Delete one token by ID:
+
+```sh
+curl -fsS -X DELETE "$PROXY_URL/admin/tokens?id=tok_..." \
+  -H "x-admin-password: $ADMIN_PASSWORD"
+```
+
+The response reports the deleted token count:
 
 ```json
 {"deletedCount":1,"ok":true}

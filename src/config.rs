@@ -1,4 +1,4 @@
-use crate::auth::{hash_secret, ClientToken};
+use crate::auth::{hash_secret, normalize_token_ids, ClientToken};
 use crate::stream::StreamProxyConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -143,7 +143,10 @@ impl ProxyConfig {
             ));
         }
         let text = fs::read_to_string(path)?;
-        serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut config: Self = serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        normalize_token_ids(&mut config.tokens);
+        Ok(config)
     }
 
     pub fn validate_startup(&self) -> Result<(), String> {
@@ -267,5 +270,38 @@ mod tests {
         assert!(!config.pairing.create_rate_limit.enabled);
         assert_eq!(60, config.pairing.create_rate_limit.window_seconds);
         assert_eq!(10, config.pairing.create_rate_limit.max_requests);
+    }
+
+    #[test]
+    fn load_backfills_missing_token_ids() {
+        let path =
+            std::env::temp_dir().join(format!("atv-config-token-id-{}.json", std::process::id()));
+        fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "listen": "127.0.0.1:8088",
+                  "admin_password_hash": "{}",
+                  "backend_channels_url": null,
+                  "provider": null,
+                  "tokens": [{{
+                    "name": "living-room",
+                    "hash": "{}",
+                    "created_at": 1,
+                    "last_seen_at": null,
+                    "enabled": true
+                  }}]
+                }}"#,
+                hash_secret("configured-password"),
+                hash_secret("raw-token")
+            ),
+        )
+        .unwrap();
+
+        let config = ProxyConfig::load_or_default(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(1, config.tokens.len());
+        assert!(config.tokens[0].id.starts_with("tok_"));
     }
 }

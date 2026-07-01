@@ -2,7 +2,9 @@ use super::authz::authorized_admin;
 use super::http::{json, json_error, parse_form, response, Request};
 use super::pairing_error;
 use super::state::AppState;
-use crate::auth::{generate_token, hash_secret, ClientToken};
+use crate::auth::{
+    generate_token, hash_secret, normalize_token_ids, token_id_from_hash, ClientToken,
+};
 use crate::cache::now_secs;
 use crate::config::{ProviderConfig, ProxyConfig};
 use crate::pairing::{ApprovePairingRequest, PairingDecisionResponse, RejectPairingRequest};
@@ -73,6 +75,7 @@ struct AdminTokensResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AdminTokenView {
+    id: String,
     name: String,
     created_at: u64,
     last_seen_at: Option<u64>,
@@ -173,11 +176,13 @@ pub(super) fn tokens_get(request: &Request, state: &AppState) -> String {
     if !authorized_admin(request, state) {
         return json_error(401, "admin_unauthorized", "admin password required");
     }
-    let cfg = state.config.lock().unwrap();
+    let mut cfg = state.config.lock().unwrap();
+    normalize_token_ids(&mut cfg.tokens);
     let data = cfg
         .tokens
         .iter()
         .map(|token| AdminTokenView {
+            id: token.id.clone(),
             name: token.name.clone(),
             created_at: token.created_at,
             last_seen_at: token.last_seen_at,
@@ -292,13 +297,7 @@ pub(super) fn create_token(request: &Request, state: &AppState) -> String {
         }
     };
     let mut cfg = state.config.lock().unwrap();
-    cfg.tokens.push(ClientToken {
-        name: name.to_string(),
-        hash: hash_secret(&raw),
-        created_at: crate::auth::now_secs(),
-        last_seen_at: None,
-        enabled: true,
-    });
+    push_client_token(&mut cfg, name, &raw);
     if let Err(e) = cfg.save_atomic(&state.config_path) {
         eprintln!("admin_token: save_failed name={name} error={e}");
         return json_error(500, "config_save_failed", &e.to_string());
@@ -316,27 +315,28 @@ pub(super) fn delete_token(request: &Request, state: &AppState) -> String {
         return json_error(401, "admin_unauthorized", "admin password required");
     }
     let form = parse_form(&request.body);
-    let Some(name) = request.query.get("name").or_else(|| form.get("name")) else {
-        return json_error(400, "missing_token_name", "name is required");
+    let Some(id) = request.query.get("id").or_else(|| form.get("id")) else {
+        return json_error(400, "missing_token_id", "id is required");
     };
-    let name = name.trim();
-    if name.is_empty() {
-        return json_error(400, "missing_token_name", "name is required");
+    let id = id.trim();
+    if id.is_empty() {
+        return json_error(400, "missing_token_id", "id is required");
     }
 
     let mut cfg = state.config.lock().unwrap();
+    normalize_token_ids(&mut cfg.tokens);
     let before = cfg.tokens.len();
-    cfg.tokens.retain(|token| token.name != name);
+    cfg.tokens.retain(|token| token.id != id);
     let deleted_count = before.saturating_sub(cfg.tokens.len());
     if deleted_count == 0 {
-        return json_error(404, "token_not_found", "token name not found");
+        return json_error(404, "token_not_found", "token id not found");
     }
     if let Err(e) = cfg.save_atomic(&state.config_path) {
-        eprintln!("admin_token_delete: save_failed name={name} error={e}");
+        eprintln!("admin_token_delete: save_failed id={id} error={e}");
         return json_error(500, "config_save_failed", &e.to_string());
     }
     eprintln!(
-        "admin_token_delete: deleted name={name} deleted_count={} remaining_tokens={}",
+        "admin_token_delete: deleted id={id} deleted_count={} remaining_tokens={}",
         deleted_count,
         cfg.tokens.len()
     );
@@ -390,13 +390,7 @@ pub(super) fn pairing_approve(request: &Request, state: &AppState) -> String {
     };
     {
         let mut cfg = state.config.lock().unwrap();
-        cfg.tokens.push(ClientToken {
-            name: candidate.token_name.clone(),
-            hash: hash_secret(&raw),
-            created_at: crate::auth::now_secs(),
-            last_seen_at: None,
-            enabled: true,
-        });
+        push_client_token(&mut cfg, &candidate.token_name, &raw);
         if let Err(e) = cfg.save_atomic(&state.config_path) {
             return json_error(500, "config_save_failed", &e.to_string());
         }
@@ -441,6 +435,35 @@ pub(super) fn pairing_reject(request: &Request, state: &AppState) -> String {
             },
         ),
         Err(e) => pairing_error(e),
+    }
+}
+
+fn push_client_token(cfg: &mut ProxyConfig, name: &str, raw: &str) {
+    normalize_token_ids(&mut cfg.tokens);
+    let hash = hash_secret(raw);
+    let id = unique_token_id(&cfg.tokens, &hash);
+    cfg.tokens.push(ClientToken {
+        id,
+        name: name.to_string(),
+        hash,
+        created_at: crate::auth::now_secs(),
+        last_seen_at: None,
+        enabled: true,
+    });
+}
+
+fn unique_token_id(tokens: &[ClientToken], hash: &str) -> String {
+    let id = token_id_from_hash(hash);
+    if tokens.iter().all(|token| token.id != id) {
+        return id;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{id}_{suffix}");
+        if tokens.iter().all(|token| token.id != candidate) {
+            return candidate;
+        }
+        suffix += 1;
     }
 }
 

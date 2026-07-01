@@ -342,6 +342,7 @@ mod tests {
             ..ProxyConfig::default()
         };
         cfg.tokens.push(ClientToken {
+            id: "token-id".into(),
             name: "living-room".into(),
             hash: hash_secret("raw-token"),
             created_at: 1,
@@ -356,6 +357,7 @@ mod tests {
         );
 
         assert!(resp.contains("200 OK"));
+        assert!(resp.contains("token-id"));
         assert!(resp.contains("living-room"));
         assert!(resp.contains("lastSeenAt"));
         assert!(!resp.contains("sha256:"));
@@ -393,12 +395,13 @@ mod tests {
     }
 
     #[test]
-    fn admin_can_delete_token_by_name() {
+    fn admin_can_delete_token_by_id() {
         let mut cfg = ProxyConfig {
             admin_password_hash: hash_secret("pw"),
             ..ProxyConfig::default()
         };
         cfg.tokens.push(ClientToken {
+            id: "token-id-1".into(),
             name: "living-room".into(),
             hash: hash_secret("token-1"),
             created_at: 1,
@@ -406,6 +409,7 @@ mod tests {
             enabled: true,
         });
         cfg.tokens.push(ClientToken {
+            id: "token-id-2".into(),
             name: "bedroom".into(),
             hash: hash_secret("token-2"),
             created_at: 1,
@@ -415,7 +419,7 @@ mod tests {
         let state = state(cfg);
 
         let resp = handle_request(
-            "DELETE /admin/tokens?name=living-room HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            "DELETE /admin/tokens?id=token-id-1 HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
             &state,
         );
 
@@ -427,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_delete_token_requires_name() {
+    fn admin_delete_token_requires_id() {
         let state = state(ProxyConfig {
             admin_password_hash: hash_secret("pw"),
             ..ProxyConfig::default()
@@ -439,7 +443,7 @@ mod tests {
         );
 
         assert!(resp.contains("400 Bad Request"));
-        assert!(resp.contains("missing_token_name"));
+        assert!(resp.contains("missing_token_id"));
     }
 
     #[test]
@@ -450,12 +454,49 @@ mod tests {
         });
 
         let resp = handle_request(
-            "DELETE /admin/tokens?name=missing HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            "DELETE /admin/tokens?id=missing HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
             &state,
         );
 
         assert!(resp.contains("404 Not Found"));
         assert!(resp.contains("token_not_found"));
+    }
+
+    #[test]
+    fn admin_delete_token_by_id_keeps_duplicate_names() {
+        let mut cfg = ProxyConfig {
+            admin_password_hash: hash_secret("pw"),
+            ..ProxyConfig::default()
+        };
+        cfg.tokens.push(ClientToken {
+            id: "first-id".into(),
+            name: "living-room".into(),
+            hash: hash_secret("token-1"),
+            created_at: 1,
+            last_seen_at: None,
+            enabled: true,
+        });
+        cfg.tokens.push(ClientToken {
+            id: "second-id".into(),
+            name: "living-room".into(),
+            hash: hash_secret("token-2"),
+            created_at: 2,
+            last_seen_at: None,
+            enabled: true,
+        });
+        let state = state(cfg);
+
+        let resp = handle_request(
+            "DELETE /admin/tokens?id=first-id HTTP/1.1\r\nx-admin-password: pw\r\n\r\n",
+            &state,
+        );
+
+        assert!(resp.contains("200 OK"));
+        assert!(resp.contains("\"deletedCount\":1"));
+        let tokens = &state.config.lock().unwrap().tokens;
+        assert_eq!(1, tokens.len());
+        assert_eq!("second-id", tokens[0].id);
+        assert_eq!("living-room", tokens[0].name);
     }
 
     #[test]
@@ -556,6 +597,7 @@ mod tests {
         let mut cfg = ProxyConfig::default();
         let raw = "token";
         cfg.tokens.push(ClientToken {
+            id: "token-id".into(),
             name: "tv".into(),
             hash: hash_secret(raw),
             created_at: 1,
@@ -642,6 +684,7 @@ mod tests {
     fn epg_validates_query() {
         let mut cfg = ProxyConfig::default();
         cfg.tokens.push(ClientToken {
+            id: "token-id".into(),
             name: "tv".into(),
             hash: hash_secret("token"),
             created_at: 1,
@@ -669,6 +712,7 @@ mod tests {
     fn fresh_epg_cache_is_served() {
         let mut cfg = ProxyConfig::default();
         cfg.tokens.push(ClientToken {
+            id: "token-id".into(),
             name: "tv".into(),
             hash: hash_secret("token"),
             created_at: 1,
