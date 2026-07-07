@@ -179,6 +179,10 @@ pub fn login(provider: &ProviderConfig) -> Result<LoginSession, String> {
         "ctc: login start user_id={} auth_base={auth_base}",
         provider.user_id
     );
+    eprintln!(
+        "ctc: auth_login_params auth_base={} path=/auth UserID={} Action=Login",
+        auth_base, provider.user_id
+    );
     let login_page = get(
         &format!(
             "{auth_base}/auth?UserID={}&Action=Login",
@@ -187,7 +191,18 @@ pub fn login(provider: &ProviderConfig) -> Result<LoginSession, String> {
         None,
     )?;
     let encry_token = parse_encry_token(&login_page).ok_or("EncryToken not found")?;
-    eprintln!("ctc: login got_encry_token");
+    eprintln!("ctc: login got_encry_token value={}", redact(&encry_token));
+    let rand = random_8_digit();
+    eprintln!(
+        "ctc: authenticator_params UserID={} Password={} STBID={} IP={} MAC={} EncryToken={} Rand={}",
+        provider.user_id,
+        redact(&provider.password),
+        provider.stb_id,
+        provider.local_ip,
+        provider.local_mac,
+        redact(&encry_token),
+        rand
+    );
     let authenticator = build_authenticator(
         &provider.user_id,
         &provider.password,
@@ -195,9 +210,18 @@ pub fn login(provider: &ProviderConfig) -> Result<LoginSession, String> {
         &provider.local_ip,
         &provider.local_mac,
         &encry_token,
-        random_8_digit(),
+        rand,
     )?;
-    eprintln!("ctc: login built_authenticator");
+    eprintln!(
+        "ctc: login built_authenticator value={}",
+        redact(&authenticator)
+    );
+    eprintln!(
+        "ctc: auth_upload_params path=/uploadAuthInfo UserID={} Authenticator={} AccessMethod=dhcp AccessUserName={}",
+        provider.user_id,
+        redact(&authenticator),
+        provider.user_id
+    );
     let upload = post_form(
         &format!("{auth_base}/uploadAuthInfo"),
         &[
@@ -216,7 +240,11 @@ pub fn login(provider: &ProviderConfig) -> Result<LoginSession, String> {
         .get("UserToken")
         .cloned()
         .ok_or("UserToken missing")?;
-    eprintln!("ctc: login got_user_token");
+    eprintln!("ctc: login got_user_token value={}", redact(&user_token));
+    eprintln!(
+        "ctc: service_list_params path=/getServiceList Cookie=UserToken={}",
+        redact(&user_token)
+    );
     let service = get(
         &format!("{auth_base}/getServiceList"),
         Some(&format!("UserToken={user_token}")),
@@ -236,6 +264,15 @@ pub fn login(provider: &ProviderConfig) -> Result<LoginSession, String> {
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
+    let mut hidden_names: Vec<&str> = hidden.keys().map(String::as_str).collect();
+    hidden_names.sort_unstable();
+    eprintln!(
+        "ctc: portal_auth_params path={}funcportalauth.jsp Cookie=JSESSIONID={} hidden_fields={} hidden_field_names={}",
+        epg_lb_base,
+        redact(&jsession_id),
+        hidden.len(),
+        hidden_names.join(",")
+    );
     let _ = post_form(
         &format!("{epg_lb_base}funcportalauth.jsp"),
         &form,
@@ -298,6 +335,14 @@ fn random_8_digit() -> u64 {
         .unwrap_or_default()
         .as_nanos() as u64;
     10_000_000 + nanos % 90_000_000
+}
+
+fn redact(value: &str) -> String {
+    if value.is_empty() {
+        "<empty>".to_string()
+    } else {
+        format!("<redacted len={}>", value.len())
+    }
 }
 
 fn get(url: &str, cookie: Option<&str>) -> Result<String, String> {
